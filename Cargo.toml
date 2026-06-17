@@ -1,0 +1,30 @@
+[package]
+name = "opencad-landsurvey-plugin"
+version = "0.1.0"
+edition = "2021"
+description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
+license = "GPL-3.0-only"
+
+# A plugin is a C-ABI dynamic library the host loads at runtime.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", features = ["host"] }
+
+# This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
+# records, so it names `acadrust` types directly. Must resolve to the *same*
+# acadrust as the host (via the patch below) for the loaded library to be
+# binary-compatible (approach B: same toolchain + dependency versions).
+acadrust = "0.3.4"
+
+# Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
+landsurvey = { path = "crates/landsurvey" }
+
+# Match the host's acadrust so the loaded library is binary-compatible.
+[patch.crates-io]
+acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "main" }
+
+[workspace]
+members = ["crates/landsurvey"]

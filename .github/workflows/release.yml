@@ -1,0 +1,46 @@
+name: release
+
+# Build the plugin cdylib for each desktop platform and attach the binaries
+# (plus plugin.toml) to a GitHub Release when a v* tag is pushed. Open CAD
+# Studio's Plugin Manager reads the release assets, picks the one matching the
+# user's OS/arch, and installs it.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ext: so
+            asset: opencad.landsurvey-linux-x86_64.so
+          - os: windows-latest
+            ext: dll
+            asset: opencad.landsurvey-windows-x86_64.dll
+          - os: macos-latest
+            ext: dylib
+            asset: opencad.landsurvey-macos-aarch64.dylib
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - name: Stage release asset
+        shell: bash
+        run: |
+          mkdir -p dist
+          # The cdylib name varies by platform (lib*.so / *.dll / lib*.dylib);
+          # the host loader accepts any name with the right extension.
+          cp target/release/*.${{ matrix.ext }} "dist/${{ matrix.asset }}"
+          cp plugin.toml dist/plugin.toml
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/${{ matrix.asset }}
+            dist/plugin.toml
