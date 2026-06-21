@@ -7,7 +7,7 @@ author = "Kevin Griffin"
 license = "GPL-3.0-only"
 
 [opencad]
-api_version = 1
+api_version = 2
 ribbon_order = 50
 command_prefixes = ["LS_"]
 xdata_apps = ["LANDSURVEY_POINT", "LANDSURVEY_PLAN"]
