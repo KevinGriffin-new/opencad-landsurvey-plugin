@@ -1,0 +1,19 @@
+<svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, sans-serif" role="img">
+<title>Animated resection</title><desc>Known control stays fixed; the occupied station converges from a guess to its solved position, rays following.</desc>
+<style>:root{--ink:var(--text-primary,#1f2328);--muted:var(--text-secondary,#57606a);}</style>
+<line x2="444.2" y2="56.0" stroke="var(--muted)" stroke-width="1.3"><animate attributeName="x1" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="354.9;354.9;354.9;354.9;354.9;354.9"/><animate attributeName="y1" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="150.3;150.3;162.7;175.1;175.1;150.3"/></line>
+<line x2="235.8" y2="70.9" stroke="var(--muted)" stroke-width="1.3"><animate attributeName="x1" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="354.9;354.9;354.9;354.9;354.9;354.9"/><animate attributeName="y1" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="150.3;150.3;162.7;175.1;175.1;150.3"/></line>
+<line x2="384.7" y2="324.0" stroke="var(--muted)" stroke-width="1.3"><animate attributeName="x1" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="354.9;354.9;354.9;354.9;354.9;354.9"/><animate attributeName="y1" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="150.3;150.3;162.7;175.1;175.1;150.3"/></line>
+<circle cx="444.2" cy="56.0" r="4" fill="#2ea043"/>
+<text x="451.2" y="49.0" font-size="12" fill="var(--muted)">CP1</text>
+<circle cx="235.8" cy="70.9" r="4" fill="#2ea043"/>
+<text x="242.8" y="63.9" font-size="12" fill="var(--muted)">CP2</text>
+<circle cx="384.7" cy="324.0" r="4" fill="#2ea043"/>
+<text x="391.7" y="317.0" font-size="12" fill="var(--muted)">CP3</text>
+<circle r="4.5" fill="#d83b3b"><animate attributeName="cx" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="354.9;354.9;354.9;354.9;354.9;354.9"/><animate attributeName="cy" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="150.3;150.3;162.7;175.1;175.1;150.3"/></circle>
+<g text-anchor="middle" font-size="14" font-weight="600">
+<text x="340" y="28" fill="var(--muted)">resection — solving station<animate attributeName="opacity" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="1;1;1;0;0;1"/></text>
+<text x="340" y="28" fill="#d83b3b">STA  E 5000.000  N 4000.000<animate attributeName="opacity" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="0;0;0;1;1;0"/></text>
+</g>
+<text x="340" y="370" text-anchor="middle" font-size="11" fill="var(--muted)">combined resection · orient 20.000° · scale 1.00000 · RMS 0.0001</text>
+</svg>

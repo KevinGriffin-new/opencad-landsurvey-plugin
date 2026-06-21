@@ -31,6 +31,19 @@ exports the two C symbols the host loader expects (via
 
 See [`PLUGIN.md`](PLUGIN.md) for the full command and XDATA reference.
 
+## Explainers
+
+Each transform / COGO operation can emit a self-contained, looping SVG rendered
+from the **actual** input — handy for QA, teaching, and outreach. These are the
+committed demo renders; the seeds and exact commands are in
+[`docs/examples/`](docs/examples/README.md).
+
+| Helmert fit | Resection (free-station) |
+|:---:|:---:|
+| ![Helmert explainer](docs/examples/helmert.svg) | ![Resection explainer](docs/examples/resection.svg) |
+| **RTS** (rotate/translate/scale) | **COGO inverse** |
+| ![RTS explainer](docs/examples/rts.svg) | ![Inverse explainer](docs/examples/inverse.svg) |
+
 ## Layout
 
 ```

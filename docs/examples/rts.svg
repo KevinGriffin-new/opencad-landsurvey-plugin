@@ -1,0 +1,19 @@
+<svg viewBox="0 0 680 380" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, sans-serif" role="img">
+<title>Animated transform</title><desc>A control shape scales, rotates, then translates.</desc>
+<style>:root{--ink:var(--text-primary,#1f2328);--muted:var(--text-secondary,#57606a);}</style>
+<line x1="240.4" y1="324.0" x2="434.3" y2="65.4" stroke="var(--muted)" stroke-width="1.2" stroke-dasharray="4 5" opacity="0.6"/>
+<polygon stroke="var(--ink)" stroke-width="2" fill-opacity="0.5"><animate attributeName="points" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="240.4,324.0 246.8,324.0 246.8,318.8 240.4,318.8 ; 240.4,324.0 248.8,324.0 248.8,317.3 240.4,317.3 ; 240.4,324.0 248.2,320.9 245.7,314.6 237.9,317.8 ; 434.3,65.4 442.1,62.2 439.6,56.0 431.8,59.1 ; 434.3,65.4 442.1,62.2 439.6,56.0 431.8,59.1 ; 240.4,324.0 246.8,324.0 246.8,318.8 240.4,318.8"/><animate attributeName="fill" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="#9aa0a6;#e0a800;#e8772e;#2ea043;#2ea043;#9aa0a6"/></polygon>
+<circle r="3.2" fill="#3a3f45"><animate attributeName="cx" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="240.4;240.4;240.4;434.3;434.3;240.4"/><animate attributeName="cy" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="324.0;324.0;324.0;65.4;65.4;324.0"/></circle>
+<circle r="3.2" fill="#3a3f45"><animate attributeName="cx" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="246.8;248.8;248.2;442.1;442.1;246.8"/><animate attributeName="cy" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="324.0;324.0;320.9;62.2;62.2;324.0"/></circle>
+<circle r="3.2" fill="#3a3f45"><animate attributeName="cx" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="246.8;248.8;245.7;439.6;439.6;246.8"/><animate attributeName="cy" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="318.8;317.3;314.6;56.0;56.0;318.8"/></circle>
+<circle r="3.2" fill="#3a3f45"><animate attributeName="cx" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="240.4;240.4;237.9;431.8;431.8;240.4"/><animate attributeName="cy" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="318.8;317.3;317.8;59.1;59.1;318.8"/></circle>
+<circle r="3.2" fill="#3a3f45"><animate attributeName="cx" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="243.6;244.6;243.0;437.0;437.0;243.6"/><animate attributeName="cy" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="321.4;320.6;319.3;60.7;60.7;321.4"/></circle>
+<g text-anchor="middle" font-size="14" font-weight="600">
+<text x="340" y="28" fill="#caa000">scale ×1.25000<animate attributeName="opacity" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="1;1;0;0;0;1"/></text>
+<text x="340" y="28" fill="#e8772e">rotate 18.000°<animate attributeName="opacity" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="0;1;1;0;0;0"/></text>
+<text x="340" y="28" fill="var(--muted)">translate<animate attributeName="opacity" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="0;0;1;1;0;0"/></text>
+<text x="340" y="28" fill="#2ea043">result<animate attributeName="opacity" dur="7s" repeatCount="indefinite" keyTimes="0;0.16;0.4;0.66;0.85;1" values="0;0;0;1;1;0"/></text>
+</g>
+<text x="340" y="46" text-anchor="middle" font-size="10" fill="var(--muted)">rotation &amp; scale exaggerated for clarity</text>
+<text x="340" y="370" text-anchor="middle" font-size="11" fill="var(--muted)">Rotate · Translate · Scale about a base point</text>
+</svg>

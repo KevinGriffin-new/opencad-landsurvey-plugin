@@ -29,3 +29,15 @@ Notes
   folder and its path printed). RTS animation is currently CLI-only.
 - The resection seed recovers station **E 5000.000, N 4000.000**, orientation
   **+20.000°**, scale **1.000000** (truth noted in the CSV header).
+
+## Preview
+
+The committed renders (regenerate any time with the commands above). They loop
+and animate in a browser / on GitHub.
+
+| | |
+|---|---|
+| **Helmert** (teach) | **RTS** (teach) |
+| ![Helmert explainer](helmert.svg) | ![RTS explainer](rts.svg) |
+| **Inverse** | **Resection** |
+| ![Inverse explainer](inverse.svg) | ![Resection explainer](resection.svg) |
