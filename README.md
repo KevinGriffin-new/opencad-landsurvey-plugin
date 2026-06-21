@@ -6,10 +6,19 @@ distributed as a prebuilt dynamic library (`cdylib`) via GitHub Releases.
 It depends only on `ocs_plugin_api` (the host's stable contract crate) and
 `acadrust` (the host's entity model) — never on the OpenCADStudio binary — and
 exports the two C symbols the host loader expects (via
-`ocs_plugin_api::export_plugin!`). It adds a **Land Survey** ribbon tab with
-PNEZD import, recognized-plan import, a COGO inverse, and a point list.
+`ocs_plugin_api::export_plugin!`). It adds a **Land Survey** ribbon tab with:
 
-See [`PLUGIN.md`](PLUGIN.md) for the command and XDATA reference.
+- **Points** — PNEZD CSV import and a point list.
+- **Surface** — build a TIN from PNEZD or **LandXML**; surface-to-surface and
+  surface-to-datum **earthwork volumes** (exact TIN overlay + grid method) with
+  drawn TINs, cut/fill lines, and result labels.
+- **COGO** — inverse (distance / azimuth / bearing).
+- **Transform** — **RTS** (rotate / translate / scale) and a least-squares
+  **Helmert** fit from control pairs, with a 7-step explainer and annotated,
+  drawn stages.
+- **Plan** — recognized-plan (`plan2cad` JSON) import.
+
+See [`PLUGIN.md`](PLUGIN.md) for the full command and XDATA reference.
 
 ## Layout
 
@@ -23,7 +32,9 @@ opencad-landsurvey-plugin/
     dispatch.rs         # LS_* command routing → acadrust entities + XDATA
     state.rs            # per-tab plugin state
   crates/
-    landsurvey/         # Layer-C engine: COGO + PNEZD + plan parsing (std + serde)
+    landsurvey/         # Layer-C engine: COGO, PNEZD, plan, LandXML, TIN/volume,
+                        #   conformal transform, DXF writer (std + serde)
+    landsurvey-cli/     # headless CLI over the engine — run + dump DXF, no host
 ```
 
 The split mirrors the three-layer model in OpenCADStudio's

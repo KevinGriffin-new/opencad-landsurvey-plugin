@@ -13,7 +13,8 @@ use ocs_plugin_api::host::{ensure_plugin_state, HostApi};
 use crate::state::LandSurveyState;
 use crate::PLUGIN_ID;
 
-use landsurvey::{cogo, plan, pnezd};
+use landsurvey::surface::{self, Surface};
+use landsurvey::{cogo, landxml, plan, pnezd, transform};
 
 /// XDATA application carrying survey metadata on a `Point` entity.
 /// Record values: `[String(point_number), String(description)]`.
@@ -22,6 +23,11 @@ pub const XDATA_POINT: &str = "LANDSURVEY_POINT";
 /// XDATA application tagging entities imported from a recognized plan.
 /// Record values: `[String(source_filename)]`.
 pub const XDATA_PLAN: &str = "LANDSURVEY_PLAN";
+
+/// XDATA application tagging entities drawn for a surface / earthwork result.
+/// Record values: `[String(surface_name), String(kind)]` where `kind` is one of
+/// `TIN`, `CUTFILL`, `LABEL`.
+pub const XDATA_SURFACE: &str = "LANDSURVEY_SURFACE";
 
 /// Default world-unit height for imported plan labels (the source JSON carries
 /// no text height).
@@ -48,6 +54,26 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
         }
         "LS_INVERSE" => {
             inverse(host, cmd);
+            true
+        }
+        "LS_VOLUME" => {
+            volume(host, cmd);
+            true
+        }
+        "LS_SURFACE" => {
+            build_surface(host, cmd);
+            true
+        }
+        "LS_DATUM" => {
+            datum_volume(host, cmd);
+            true
+        }
+        "LS_RTS" => {
+            rts(host, cmd);
+            true
+        }
+        "LS_HELMERT" => {
+            helmert(host, cmd);
             true
         }
         "LS_LIST" => {
@@ -155,6 +181,562 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
         inv.azimuth_deg,
         cogo::azimuth_to_bearing(inv.azimuth_deg)
     ));
+}
+
+/// `LS_SURFACE <points.csv>` — build a TIN from a PNEZD file and draw its
+/// triangulation as `Line` entities on layer `LS-TIN-<NAME>` (tagged with
+/// `LANDSURVEY_SURFACE` XDATA). Reports point/triangle counts and plan area.
+/// Wired to the ribbon via a native file picker.
+fn build_surface(host: &mut dyn HostApi, cmd: &str) {
+    let arg = first_arg(cmd);
+    if arg.is_empty() {
+        host.push_info("Usage: LS_SURFACE <points.csv>  (PNEZD point file)");
+        return;
+    }
+    let surf = match read_surface(host, arg) {
+        Some(s) => s,
+        None => return,
+    };
+    let name = layer_stem(arg);
+    let layer = format!("LS-TIN-{name}");
+
+    host.push_undo("LS_SURFACE");
+    let edges = draw_tin(host, &surf, &layer, &name);
+    host.bump_geometry();
+    host.set_dirty();
+
+    let (npts, ntri, area) = (surf.nodes.len(), surf.triangles.len(), surf.area_2d());
+    // Retain the surface so LS_VOLUME / LS_DATUM can use it by name later.
+    {
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        st.put_surface(&name, surf);
+    }
+    host.push_output(&format!(
+        "LS_SURFACE: stored \"{name}\" — {npts} pts, {ntri} triangles, {edges} TIN edges on \
+         layer {layer}; plan area {area:.3}. (Use it in LS_VOLUME / LS_DATUM by name.)"
+    ));
+}
+
+/// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a
+/// horizontal plane. Draws the TIN, the datum contour, and a result label.
+fn datum_volume(host: &mut dyn HostApi, cmd: &str) {
+    let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if args.len() < 2 {
+        host.push_info("Usage: LS_DATUM <surface.csv|xml> <elevation>");
+        return;
+    }
+    let elev: f64 = match args[1].parse() {
+        Ok(v) => v,
+        Err(_) => {
+            host.push_info(&format!("LS_DATUM: elevation must be a number, got \"{}\"", args[1]));
+            return;
+        }
+    };
+    let surf = match resolve_named_surface(host, args[0]) {
+        Ok(s) => s,
+        Err(_) => {
+            let avail = stored_surface_names(host);
+            host.push_error(&format!(
+                "LS_DATUM: no surface \"{}\" (not imported, not a readable file). \
+                 Imported surfaces: [{}].",
+                args[0],
+                avail.join(", ")
+            ));
+            return;
+        }
+    };
+
+    let (cf, contour) = surf.cut_fill_to_datum_detailed(elev);
+    host.push_output(&format!(
+        "LS_DATUM (vs elev {elev}): cut {:.3} (above), fill {:.3} (below), net {:.3} \
+         [{} pts, {} triangles].",
+        cf.cut,
+        cf.fill,
+        cf.net,
+        surf.nodes.len(),
+        surf.triangles.len()
+    ));
+
+    host.push_undo("LS_DATUM draw");
+    let nt = draw_tin(host, &surf, "LS-TIN-DATUM", "DATUM");
+    let mut nl = 0usize;
+    for s in &contour {
+        let ent = EntityType::Line(Line::from_points(
+            Vector3::new(s[0][0], s[0][1], elev),
+            Vector3::new(s[1][0], s[1][1], elev),
+        ));
+        tag_surface(host, ent, "LS-DATUM", "DATUM", "CONTOUR");
+        nl += 1;
+    }
+    let (minx, maxx, miny, maxy) = surf.extent();
+    let height = ((maxx - minx).max(maxy - miny) / 50.0).max(1.0);
+    let ent = EntityType::Text(
+        Text::with_value(
+            format!("ELEV {elev}  CUT {:.2}  FILL {:.2}  NET {:.2}", cf.cut, cf.fill, cf.net),
+            Vector3::new((minx + maxx) / 2.0, (miny + maxy) / 2.0, 0.0),
+        )
+        .with_height(height),
+    );
+    tag_surface(host, ent, "LS-VOLUME-LABEL", "DATUM", "LABEL");
+    host.bump_geometry();
+    host.set_dirty();
+    host.push_output(&format!(
+        "LS_DATUM: drew TIN ({nt} edges), datum contour ({nl} seg), result label."
+    ));
+}
+
+/// `LS_VOLUME <top.csv> <bottom.csv> [grid_step] [draw]` — earthwork volume
+/// between two PNEZD point surfaces. Reports the exact TIN-overlay cut/fill/net
+/// and, when a `grid_step` is given, the grid (column) method too. Add the
+/// `draw` keyword to draw both TINs, the cut/fill boundary line, and a result
+/// label. File-based and command-line-driven so the same two point files can be
+/// fed to MicroSurvey / Civil 3D for a ground-truth cross-check. (Paths must not
+/// contain spaces.)
+fn volume(host: &mut dyn HostApi, cmd: &str) {
+    // Tokens: surface names (or file paths) are positional; a bare positive
+    // number is the grid step; the literal "draw" turns on drawing.
+    let mut names: Vec<String> = Vec::new();
+    let mut grid_step: Option<f64> = None;
+    let mut draw = false;
+    for a in cmd.split_whitespace().skip(1) {
+        if a.eq_ignore_ascii_case("draw") {
+            draw = true;
+        } else if let Ok(v) = a.parse::<f64>() {
+            if v > 0.0 {
+                grid_step = Some(v);
+            }
+        } else {
+            names.push(a.to_string());
+        }
+    }
+
+    // Default to the surfaces named "top" and "bottom" built this session.
+    let (top_tok, bot_tok) = match names.as_slice() {
+        [] => ("top".to_string(), "bottom".to_string()),
+        [_one] => {
+            host.push_info(
+                "Usage: LS_VOLUME [<top> <bottom>] [grid_step] [draw]  — names of \
+                 imported surfaces (or file paths); defaults to top/bottom.",
+            );
+            return;
+        }
+        [a, b, ..] => (a.clone(), b.clone()),
+    };
+
+    let top = match resolve_named_surface(host, &top_tok) {
+        Ok(s) => s,
+        Err(_) => {
+            let avail = stored_surface_names(host);
+            host.push_error(&format!(
+                "LS_VOLUME: no surface \"{top_tok}\" (not imported, not a readable file). \
+                 Imported surfaces: [{}]. Build Surface first, then click Volume.",
+                avail.join(", ")
+            ));
+            return;
+        }
+    };
+    let bottom = match resolve_named_surface(host, &bot_tok) {
+        Ok(s) => s,
+        Err(_) => {
+            let avail = stored_surface_names(host);
+            host.push_error(&format!(
+                "LS_VOLUME: no surface \"{bot_tok}\" (not imported, not a readable file). \
+                 Imported surfaces: [{}].",
+                avail.join(", ")
+            ));
+            return;
+        }
+    };
+
+    host.push_output(&format!("LS_VOLUME: {top_tok} (top) minus {bot_tok} (bottom)."));
+    let detailed = surface::composite_cut_fill_detailed(&top, &bottom);
+    let cf = detailed.cut_fill;
+    host.push_output(&format!(
+        "LS_VOLUME (exact TIN overlay): cut {:.3}, fill {:.3}, net {:.3} \
+         [top {} pts, bottom {} pts].",
+        cf.cut,
+        cf.fill,
+        cf.net,
+        top.nodes.len(),
+        bottom.nodes.len()
+    ));
+
+    if let Some(step) = grid_step {
+        let g = surface::grid_cut_fill(&top, &bottom, step);
+        host.push_output(&format!(
+            "LS_VOLUME (grid @ {:.3}): cut {:.3}, fill {:.3}, net {:.3}, \
+             plan area {:.3}, {} cells.",
+            step, g.cut, g.fill, g.net, g.plan_area, g.n_cells
+        ));
+    }
+
+    if draw {
+        host.push_undo("LS_VOLUME draw");
+        let nt = draw_tin(host, &top, "LS-TIN-TOP", "TOP");
+        let nb = draw_tin(host, &bottom, "LS-TIN-BOTTOM", "BOTTOM");
+        let nl = draw_segments(host, &detailed.cutfill_line, "LS-CUTFILL", "CUTFILL");
+        draw_volume_label(host, &top, &cf);
+        host.bump_geometry();
+        host.set_dirty();
+        host.push_output(&format!(
+            "LS_VOLUME: drew TOP TIN ({nt} edges), BOTTOM TIN ({nb} edges), \
+             cut/fill line ({nl} seg), result label."
+        ));
+    }
+}
+
+/// Read a surface from a file, auto-detecting LandXML (a TIN with explicit
+/// faces) vs a PNEZD point file (triangulated here). Nodes map X=Easting,
+/// Y=Northing, Z=Elevation. Pure — returns `Err(message)` rather than touching
+/// the host, so it composes into both the reporting and resolving paths.
+fn read_surface_quiet(path: &str) -> Result<Surface, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    if landxml::looks_like_landxml(&text) {
+        return landxml::read_first_surface(&text)
+            .map(|ns| ns.surface)
+            .ok_or_else(|| format!("no TIN surface in LandXML \"{path}\""));
+    }
+    let outcome = pnezd::parse(&text);
+    if outcome.points.len() < 3 {
+        return Err(format!(
+            "\"{path}\" has {} usable point(s); need at least 3 for a surface",
+            outcome.points.len()
+        ));
+    }
+    let nodes: Vec<[f64; 3]> = outcome
+        .points
+        .iter()
+        .map(|p| [p.easting, p.northing, p.elevation])
+        .collect();
+    Ok(Surface::from_points(&nodes))
+}
+
+/// Read a surface from a file, reporting any error to the host console.
+fn read_surface(host: &mut dyn HostApi, path: &str) -> Option<Surface> {
+    match read_surface_quiet(path) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            host.push_error(&format!("LandSurvey: {e}"));
+            None
+        }
+    }
+}
+
+/// Resolve a token to a surface: first a surface built/imported this session
+/// (by name, case-insensitive), otherwise a file path. Lets commands operate on
+/// already-imported surfaces without re-entering coordinates.
+fn resolve_named_surface(host: &mut dyn HostApi, token: &str) -> Result<Surface, String> {
+    {
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        if let Some(s) = st.get_surface(token) {
+            return Ok(s.clone());
+        }
+    }
+    read_surface_quiet(token)
+}
+
+/// Names of surfaces stored this session, for "did you mean" error messages.
+fn stored_surface_names(host: &mut dyn HostApi) -> Vec<String> {
+    let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+    st.surface_names().iter().map(|s| s.to_string()).collect()
+}
+
+/// Uppercased file stem of `path`, used as a surface name / layer suffix.
+fn layer_stem(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_uppercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "SURFACE".to_string())
+}
+
+/// Draw a surface's unique TIN edges as 3-D `Line` entities on `layer`, each
+/// tagged `LANDSURVEY_SURFACE [name, "TIN"]`. Returns the edge count.
+fn draw_tin(host: &mut dyn HostApi, surf: &Surface, layer: &str, name: &str) -> usize {
+    let mut n = 0;
+    for e in surf.edges() {
+        let a = surf.nodes[e[0]];
+        let b = surf.nodes[e[1]];
+        let ent = EntityType::Line(Line::from_points(
+            Vector3::new(a[0], a[1], a[2]),
+            Vector3::new(b[0], b[1], b[2]),
+        ));
+        tag_surface(host, ent, layer, name, "TIN");
+        n += 1;
+    }
+    n
+}
+
+/// Draw plan-view 2-D segments (e.g. the cut/fill boundary) on `layer`.
+fn draw_segments(
+    host: &mut dyn HostApi,
+    segs: &[[[f64; 2]; 2]],
+    layer: &str,
+    name: &str,
+) -> usize {
+    for s in segs {
+        let ent = EntityType::Line(Line::from_points(
+            Vector3::new(s[0][0], s[0][1], 0.0),
+            Vector3::new(s[1][0], s[1][1], 0.0),
+        ));
+        tag_surface(host, ent, layer, name, "CUTFILL");
+    }
+    segs.len()
+}
+
+/// Place a result label (cut/fill/net) at the centre of the top surface's
+/// extent, sized relative to the surface so it is legible at any scale.
+fn draw_volume_label(host: &mut dyn HostApi, top: &Surface, cf: &surface::CutFill) {
+    let (minx, maxx, miny, maxy) = top.extent();
+    let cx = (minx + maxx) / 2.0;
+    let cy = (miny + maxy) / 2.0;
+    let height = ((maxx - minx).max(maxy - miny) / 50.0).max(1.0);
+    let label = format!("CUT {:.2}  FILL {:.2}  NET {:.2}", cf.cut, cf.fill, cf.net);
+    let ent = EntityType::Text(
+        Text::with_value(label, Vector3::new(cx, cy, 0.0)).with_height(height),
+    );
+    tag_surface(host, ent, "LS-VOLUME-LABEL", "VOLUME", "LABEL");
+}
+
+/// Set the layer, add the entity, and tag it with `LANDSURVEY_SURFACE`
+/// `[name, kind]` (via `write_record`, which registers the APPID for round-trip).
+fn tag_surface(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, name: &str, kind: &str) {
+    ent.common_mut().layer = layer.to_string();
+    let handle = host.add_entity(ent);
+    let mut rec = ExtendedDataRecord::new(XDATA_SURFACE);
+    rec.add_value(XDataValue::String(name.to_string()));
+    rec.add_value(XDataValue::String(kind.to_string()));
+    host.write_record(handle, rec);
+}
+
+/// `LS_RTS <baseN> <baseE> <rot_deg> <scale> [<toN> <toE>]` — Rotate/Translate/
+/// Scale every entity in the drawing about a base point (CCW+ rotation). With a
+/// `<toN> <toE>` the base is moved there (translation); omit it to rotate/scale
+/// in place. Implemented as translate(-base) -> scale -> rotate -> translate(+to),
+/// which reproduces the engine's `Conformal::from_base_swing`.
+fn rts(host: &mut dyn HostApi, cmd: &str) {
+    let nums: Vec<f64> = cmd
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|t| t.parse::<f64>().ok())
+        .collect();
+    if nums.len() < 4 {
+        host.push_info("Usage: LS_RTS <baseN> <baseE> <rot_deg> <scale> [<toN> <toE>]");
+        return;
+    }
+    let (bn, be, rot_deg, scale) = (nums[0], nums[1], nums[2], nums[3]);
+    let (tn, te) = if nums.len() >= 6 { (nums[4], nums[5]) } else { (bn, be) };
+    let rot = rot_deg.to_radians();
+
+    host.push_undo("LS_RTS");
+    let mut count = 0usize;
+    for ent in host.document_mut().entities_mut() {
+        let e = ent.as_entity_mut();
+        // base -> origin, scale + rotate about origin, then origin -> destination.
+        e.translate(Vector3::new(-be, -bn, 0.0));
+        e.apply_scaling(scale);
+        e.apply_rotation(Vector3::new(0.0, 0.0, 1.0), rot);
+        e.translate(Vector3::new(te, tn, 0.0));
+        count += 1;
+    }
+    if count == 0 {
+        host.push_info("LS_RTS: no entities in the drawing to transform.");
+        return;
+    }
+    host.bump_geometry();
+    host.set_dirty();
+    let plural = if count == 1 { "entity" } else { "entities" };
+    host.push_output(&format!(
+        "LS_RTS: transformed {count} {plural} — rot {rot_deg}\u{b0} CCW+, scale {scale}, \
+         base ({bn},{be}) -> ({tn},{te})."
+    ));
+}
+
+/// `LS_HELMERT <pairs_file> [apply]` — least-squares 2-D conformal (Helmert)
+/// fit from control pairs (`srcN, srcE, dstN, dstE` per line). Reports the
+/// transform + per-pair residuals + RMS. With a trailing `apply`, transforms
+/// every entity in the drawing by the fitted transform.
+fn helmert(host: &mut dyn HostApi, cmd: &str) {
+    let rest = cmd
+        .splitn(2, char::is_whitespace)
+        .nth(1)
+        .map(str::trim)
+        .unwrap_or("");
+    if rest.is_empty() {
+        host.push_info(
+            "Usage: LS_HELMERT <pairs_file> [apply|stages]  (lines: srcN, srcE, dstN, dstE; \
+             'stages' draws the transform steps, 'apply' transforms the drawing)",
+        );
+        return;
+    }
+    // A trailing mode keyword (path may contain spaces, so strip from the end).
+    let lower = rest.to_ascii_lowercase();
+    let (path, apply, stages) = if lower.ends_with(" apply") {
+        (rest[..rest.len() - 6].trim(), true, false)
+    } else if lower.ends_with(" stages") {
+        (rest[..rest.len() - 7].trim(), false, true)
+    } else {
+        (rest, false, false)
+    };
+
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            host.push_error(&format!("LS_HELMERT: cannot read \"{path}\": {e}"));
+            return;
+        }
+    };
+    let pairs = transform::parse_control_pairs(&text);
+    if pairs.len() < 2 {
+        host.push_error(&format!(
+            "LS_HELMERT: \"{path}\" has {} control pair(s); need at least 2.",
+            pairs.len()
+        ));
+        return;
+    }
+    let steps = match transform::helmert_fit_explained(&pairs) {
+        Ok(s) => s,
+        Err(e) => {
+            host.push_error(&format!("LS_HELMERT: {e}"));
+            return;
+        }
+    };
+    let t = steps.transform;
+    let (res, rms) = transform::fit_residuals(&t, &pairs);
+    let max = res.iter().cloned().fold(0.0_f64, f64::max);
+
+    // The fit, as 7 explicit steps.
+    host.push_output("LS_HELMERT — 2D 4-parameter conformal (Rotate/Translate/Scale):");
+    host.push_output(&format!(
+        "  step 1  source centroid : E {:.4}, N {:.4}",
+        steps.src_centroid.0, steps.src_centroid.1
+    ));
+    host.push_output(&format!(
+        "  step 2  target centroid : E {:.4}, N {:.4}",
+        steps.dst_centroid.0, steps.dst_centroid.1
+    ));
+    host.push_output(&format!(
+        "  step 3  cross-cov sums  : Sxx {:.4}, Sxy {:.4}, S|d|^2 {:.4}",
+        steps.sxx, steps.sxy, steps.sum_sq
+    ));
+    host.push_output(&format!("  step 4  scale  s        : {:.8}", steps.scale()));
+    host.push_output(&format!("  step 5  rotation theta  : {:.6}\u{b0} CCW+", steps.rotation_deg()));
+    host.push_output(&format!("  step 6  translation     : E {:.4}, N {:.4}", t.c, t.d));
+    host.push_output(&format!(
+        "  step 7  residuals       : RMS {:.5}, max {:.5}  ({} pairs)",
+        rms, max, pairs.len()
+    ));
+    for (i, r) in res.iter().enumerate().take(12) {
+        host.push_output(&format!("            pair {:>2}: {:.5}", i + 1, r));
+    }
+
+    if stages {
+        host.push_undo("LS_HELMERT stages");
+        let n = draw_helmert_stages(host, &steps, &pairs, max);
+        host.bump_geometry();
+        host.set_dirty();
+        host.push_output(&format!(
+            "LS_HELMERT: drew {n} stage entities (layers LS-HMT-0-SRC..3-FINAL, TARGET, RESID, PATH)."
+        ));
+    }
+
+    if apply {
+        let scale = t.scale();
+        let rot = t.rotation_deg().to_radians();
+        host.push_undo("LS_HELMERT apply");
+        let mut count = 0usize;
+        for ent in host.document_mut().entities_mut() {
+            let e = ent.as_entity_mut();
+            // E' = s*R*(E,N) + (c,d): scale & rotate about origin, then translate.
+            e.apply_scaling(scale);
+            e.apply_rotation(Vector3::new(0.0, 0.0, 1.0), rot);
+            e.translate(Vector3::new(t.c, t.d, 0.0));
+            count += 1;
+        }
+        host.bump_geometry();
+        host.set_dirty();
+        host.push_output(&format!("LS_HELMERT: applied fit to {count} entit{}.", if count == 1 { "y" } else { "ies" }));
+    }
+}
+
+/// Draw the Helmert application as discrete stages so the transform can be seen:
+/// each control point as source -> scaled -> rotated -> final (with its path),
+/// the actual targets, residual vectors, and the two centroids. Returns the
+/// entity count.
+fn draw_helmert_stages(
+    host: &mut dyn HostApi,
+    steps: &transform::HelmertSteps,
+    pairs: &[((f64, f64), (f64, f64))],
+    max_resid: f64,
+) -> usize {
+    // Survey points need a visible point style.
+    {
+        let header = &mut host.document_mut().header;
+        if header.point_display_mode == 0 {
+            header.point_display_mode = 3;
+        }
+        if header.point_display_size == 0.0 {
+            header.point_display_size = 5.0;
+        }
+    }
+    let stage_layers = ["LS-HMT-0-SRC", "LS-HMT-1-SCALED", "LS-HMT-2-ROTATED", "LS-HMT-3-FINAL"];
+    let mut n = 0usize;
+    for &((se, sn), (de, dn)) in pairs {
+        let st = steps.stages(se, sn);
+        for (i, &(x, y)) in st.iter().enumerate() {
+            add_on_layer(host, EntityType::Point(CadPoint::at(Vector3::new(x, y, 0.0))), stage_layers[i]);
+            n += 1;
+        }
+        add_on_layer(host, EntityType::Point(CadPoint::at(Vector3::new(de, dn, 0.0))), "LS-HMT-TARGET");
+        for w in 0..3 {
+            let a = Vector3::new(st[w].0, st[w].1, 0.0);
+            let b = Vector3::new(st[w + 1].0, st[w + 1].1, 0.0);
+            add_on_layer(host, EntityType::Line(Line::from_points(a, b)), "LS-HMT-PATH");
+        }
+        let fin = Vector3::new(st[3].0, st[3].1, 0.0);
+        let tgt = Vector3::new(de, dn, 0.0);
+        add_on_layer(host, EntityType::Line(Line::from_points(fin, tgt)), "LS-HMT-RESID");
+        n += 4;
+    }
+    for &(cx, cy) in &[steps.src_centroid, steps.dst_centroid] {
+        add_on_layer(host, EntityType::Point(CadPoint::at(Vector3::new(cx, cy, 0.0))), "LS-HMT-CENTROID");
+        n += 1;
+    }
+
+    // Numbered step annotations: 1-3 in place at the source centroid, 4 along
+    // the move, 5 at the target. Height sized from the source control spread.
+    let (smnx, smxx, smny, smxy) = pairs.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY),
+        |(a, b, c, e), &((se, sn), _)| (a.min(se), b.max(se), c.min(sn), e.max(sn)),
+    );
+    let h = ((smxx - smnx).max(smxy - smny) / 12.0).max(0.5);
+    let (sg, dg) = (steps.src_centroid, steps.dst_centroid);
+    let labels: [(f64, f64, String); 5] = [
+        (sg.0 + h, sg.1 + h * 3.0, "1 source".to_string()),
+        (sg.0 + h, sg.1 + h * 1.6, format!("2 scale x{:.5}", steps.scale())),
+        (sg.0 + h, sg.1 + h * 0.2, format!("3 rotate {:.4} deg", steps.rotation_deg())),
+        (
+            (sg.0 + dg.0) / 2.0,
+            (sg.1 + dg.1) / 2.0 + h * 1.5,
+            format!("4 translate dE {:.2} dN {:.2}", dg.0 - sg.0, dg.1 - sg.1),
+        ),
+        (dg.0 + h, dg.1 + h * 3.0, format!("5 residual max {:.4}", max_resid)),
+    ];
+    for (x, y, text) in labels {
+        add_on_layer(
+            host,
+            EntityType::Text(Text::with_value(text, Vector3::new(x, y, 0.0)).with_height(h)),
+            "LS-HMT-LABEL",
+        );
+        n += 1;
+    }
+    n
+}
+
+/// Set an entity's layer and add it (no XDATA), for transient/illustrative geometry.
+fn add_on_layer(host: &mut dyn HostApi, mut ent: EntityType, layer: &str) {
+    ent.common_mut().layer = layer.to_string();
+    host.add_entity(ent);
 }
 
 /// `LS_LIST` — count entities carrying the `LANDSURVEY_POINT` XDATA record.

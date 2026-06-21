@@ -63,6 +63,70 @@ impl CadModule for LandSurveyModule {
                     event: ModuleEvent::Command("LS_INVERSE".to_string()),
                 })],
             },
+            RibbonGroup {
+                title: "Transform",
+                tools: vec![
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_RTS",
+                        // Clicking prints usage; the user then types
+                        // `LS_RTS <baseN> <baseE> <rot_deg> <scale> [<toN> <toE>]`.
+                        label: "RTS",
+                        icon: IconKind::Glyph("\u{27F3}"), // ⟳ rotate/translate/scale
+                        event: ModuleEvent::Command("LS_RTS".to_string()),
+                    }),
+                    // Native picker -> "LS_HELMERT <path>": best-fit from control
+                    // pairs (append " apply" on the command line to transform).
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_HELMERT",
+                        label: "Helmert",
+                        icon: IconKind::Glyph("\u{2245}"), // ≅ (best-fit)
+                        event: ModuleEvent::PluginFileDialog {
+                            command: "LS_HELMERT".to_string(),
+                            title: "Helmert fit from control pairs".to_string(),
+                            filter_name: "Control pairs (srcN,srcE,dstN,dstE)".to_string(),
+                            extensions: vec!["csv".to_string(), "txt".to_string()],
+                        },
+                    }),
+                ],
+            },
+            RibbonGroup {
+                title: "Surface",
+                tools: vec![
+                    // Native picker -> "LS_SURFACE <path>": build + draw a TIN.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_SURFACE",
+                        label: "Build Surface",
+                        icon: IconKind::Glyph("\u{25B3}"), // △ (TIN)
+                        event: ModuleEvent::PluginFileDialog {
+                            command: "LS_SURFACE".to_string(),
+                            title: "Build surface from points or LandXML".to_string(),
+                            filter_name: "PNEZD or LandXML surface".to_string(),
+                            extensions: vec![
+                                "csv".to_string(),
+                                "txt".to_string(),
+                                "xml".to_string(),
+                                "landxml".to_string(),
+                            ],
+                        },
+                    }),
+                    // Clicking prints usage; the user then types
+                    // `LS_VOLUME <top.csv> <bottom.csv> [grid_step] [draw]`.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_VOLUME",
+                        label: "Volume",
+                        icon: IconKind::Glyph("\u{2206}"), // ∆ (cut/fill)
+                        event: ModuleEvent::Command("LS_VOLUME".to_string()),
+                    }),
+                    // Clicking prints usage; the user then types
+                    // `LS_DATUM <surface> <elevation>`.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_DATUM",
+                        label: "To Datum",
+                        icon: IconKind::Glyph("\u{2261}"), // ≡ (level plane)
+                        event: ModuleEvent::Command("LS_DATUM".to_string()),
+                    }),
+                ],
+            },
         ]
     }
 }

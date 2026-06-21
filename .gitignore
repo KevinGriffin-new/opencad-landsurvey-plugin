@@ -1,3 +1,5 @@
 /target
 **/*.rs.bk
 Cargo.lock
+# internal working draft for issue #157 — not for the public repo
+docs/landxml-import-proposal.md

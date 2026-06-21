@@ -1,0 +1,15 @@
+[package]
+name = "landsurvey-cli"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Headless CLI for the Land Survey engine — run COGO/surface/volume against files and dump DXF for preview without launching Open CAD Studio."
+
+# Pure consumer of the host-free `landsurvey` engine (std only). No acadrust /
+# ocs_plugin_api — so it builds and runs fast and offline for dev iteration.
+[dependencies]
+landsurvey = { path = "../landsurvey" }
+
+[[bin]]
+name = "landsurvey-cli"
+path = "src/main.rs"

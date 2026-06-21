@@ -1,6 +1,6 @@
 [package]
 name = "opencad-landsurvey-plugin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
 license = "GPL-3.0-only"
@@ -29,4 +29,4 @@ landsurvey = { path = "crates/landsurvey" }
 acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "67db8eeeb63e429d301f7708ee8a4629ed3eb780" }
 
 [workspace]
-members = ["crates/landsurvey"]
+members = ["crates/landsurvey", "crates/landsurvey-cli"]

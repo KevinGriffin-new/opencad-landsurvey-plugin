@@ -24,13 +24,13 @@ pub const PLUGIN_ID: &str = "opencad.landsurvey";
 static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN_ID,
     name: "Land Survey",
-    version: "0.1.0",
-    description: "Survey points, PNEZD import, recognized-plan import, and COGO geometry",
+    version: "0.2.0",
+    description: "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert)",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 50,
     // Both XDATA applications this plugin writes (see dispatch.rs). Declaring
     // them lets the host pre-register the APPIDs for DWG/DXF round-trip.
-    xdata_apps: &[dispatch::XDATA_POINT, dispatch::XDATA_PLAN],
+    xdata_apps: &[dispatch::XDATA_POINT, dispatch::XDATA_PLAN, dispatch::XDATA_SURFACE],
     command_prefixes: &["LS_"],
 };
 
