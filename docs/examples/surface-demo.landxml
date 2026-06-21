@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- LandXML TIN demo — a small sloping pad. <P> is "northing easting elevation".
+     The last face carries i="1" (invisible hull pad): it MUST be skipped, or the
+     plan area / volume would be inflated. Seeds LS_LANDXML (Mesh) and LS_SURFACE. -->
+<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" version="1.2">
+  <Units><Metric areaUnit="squareMeter" linearUnit="meter" /></Units>
+  <Surfaces>
+    <Surface name="PadEG">
+      <Definition surfType="TIN">
+        <Pnts>
+          <P id="1">0 0 10.00</P>
+          <P id="2">0 100 12.00</P>
+          <P id="3">100 100 15.00</P>
+          <P id="4">100 0 11.00</P>
+          <P id="5">50 50 13.00</P>
+        </Pnts>
+        <Faces>
+          <F>1 2 5</F>
+          <F>2 3 5</F>
+          <F>3 4 5</F>
+          <F>4 1 5</F>
+          <F i="1">1 3 2</F>
+        </Faces>
+      </Definition>
+    </Surface>
+  </Surfaces>
+</LandXML>

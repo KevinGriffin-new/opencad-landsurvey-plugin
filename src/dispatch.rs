@@ -6,6 +6,7 @@
 use std::fs;
 
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
+use acadrust::entities::Mesh;
 use acadrust::{Arc as CadArc, Circle, EntityType, Line, Point as CadPoint, Text, Vector3};
 
 use ocs_plugin_api::host::{ensure_plugin_state, HostApi};
@@ -62,6 +63,13 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
         }
         "LS_SURFACE" => {
             build_surface(host, cmd);
+            true
+        }
+        // `LS_LANDXML` is our own ribbon command; `LANDXMLIMPORT` is the host's
+        // Insert-tab button verb — we handle it so the host can dispatch LandXML
+        // import to this plugin (per OpenCADStudio issue #157).
+        "LS_LANDXML" | "LANDXMLIMPORT" => {
+            import_landxml(host, cmd);
             true
         }
         "LS_DATUM" => {
@@ -240,6 +248,68 @@ fn build_surface(host: &mut dyn HostApi, cmd: &str) {
         "LS_SURFACE: stored \"{name}\" — {npts} pts, {ntri} triangles, {edges} TIN edges on \
          layer {layer}; plan area {area:.3}. (Use it in LS_VOLUME / LS_DATUM by name.)"
     ));
+}
+
+/// `LS_LANDXML <path>` (and the host's `LANDXMLIMPORT` verb) — import LandXML
+/// TIN surface(s) as `Mesh` entities. Per OpenCADStudio issue #157: the entity
+/// type is `Mesh`; `<P>` is `northing easting [elev]` → world X=E/Y=N/Z=Z; units
+/// are imported as-is; invisible `<F i="1">` faces are skipped — all handled in
+/// the engine parser (`landxml`). Each surface is drawn on `LS-TIN-<NAME>`,
+/// tagged `LANDSURVEY_SURFACE`, and retained by name for LS_VOLUME / LS_DATUM.
+fn import_landxml(host: &mut dyn HostApi, cmd: &str) {
+    let arg = first_arg(cmd);
+    if arg.is_empty() {
+        host.push_info("Usage: LS_LANDXML <path-to-surface.xml>  (LandXML TIN surface)");
+        return;
+    }
+    let text = match fs::read_to_string(arg) {
+        Ok(t) => t,
+        Err(e) => {
+            host.push_error(&format!("LS_LANDXML: cannot read \"{arg}\": {e}"));
+            return;
+        }
+    };
+    if !landxml::looks_like_landxml(&text) {
+        host.push_error(&format!("LS_LANDXML: \"{arg}\" does not look like LandXML."));
+        return;
+    }
+    let surfaces = landxml::read_surfaces(&text);
+    if surfaces.is_empty() {
+        host.push_error(&format!("LS_LANDXML: no TIN surface found in \"{arg}\"."));
+        return;
+    }
+
+    host.push_undo("LS_LANDXML import");
+    let mut total_tris = 0usize;
+    let mut names: Vec<String> = Vec::new();
+    for ns in &surfaces {
+        let layer = format!("LS-TIN-{}", ns.name);
+        let mesh = mesh_from_surface(&ns.surface);
+        tag_surface(host, EntityType::Mesh(mesh), &layer, &ns.name, "TIN");
+        total_tris += ns.surface.triangles.len();
+        names.push(ns.name.clone());
+        // Retain for LS_VOLUME / LS_DATUM by name (same as LS_SURFACE).
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        st.put_surface(&ns.name, ns.surface.clone());
+    }
+    host.bump_geometry();
+    host.set_dirty();
+    host.push_output(&format!(
+        "LS_LANDXML: imported {} surface(s) [{}] as Mesh — {total_tris} triangle(s) total. \
+         (Use in LS_VOLUME / LS_DATUM by name.)",
+        surfaces.len(),
+        names.join(", ")
+    ));
+}
+
+/// Build an `acadrust` `Mesh` from an engine `Surface`: nodes are `[E, N, Z]`
+/// (= world `[X, Y, Z]`), triangles index those nodes.
+fn mesh_from_surface(surf: &Surface) -> Mesh {
+    let verts: Vec<Vector3> =
+        surf.nodes.iter().map(|n| Vector3::new(n[0], n[1], n[2])).collect();
+    let tris: Vec<(usize, usize, usize)> =
+        surf.triangles.iter().map(|t| (t[0], t[1], t[2])).collect();
+    Mesh::from_triangles(verts, &tris)
 }
 
 /// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a

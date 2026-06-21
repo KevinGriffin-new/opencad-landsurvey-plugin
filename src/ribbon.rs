@@ -109,6 +109,19 @@ impl CadModule for LandSurveyModule {
                             ],
                         },
                     }),
+                    // Native picker -> "LS_LANDXML <path>": import a LandXML TIN
+                    // surface as a Mesh entity (per OpenCADStudio issue #157).
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_LANDXML",
+                        label: "LandXML",
+                        icon: IconKind::Glyph("\u{229E}"), // ⊞ (mesh)
+                        event: ModuleEvent::PluginFileDialog {
+                            command: "LS_LANDXML".to_string(),
+                            title: "Import LandXML TIN surface".to_string(),
+                            filter_name: "LandXML surface".to_string(),
+                            extensions: vec!["xml".to_string(), "landxml".to_string()],
+                        },
+                    }),
                     // Clicking prints usage; the user then types
                     // `LS_VOLUME <top.csv> <bottom.csv> [grid_step] [draw]`.
                     RibbonItem::LargeTool(ToolDef {

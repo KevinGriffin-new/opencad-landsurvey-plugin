@@ -12,6 +12,7 @@ dependency; a headless `landsurvey-cli` exercises the same engine and dumps DXF.
 |---------|--------|-------------|
 | `LS_PNEZD <path>` | ribbon file dialog | Import a PNEZD CSV (`P,N,E,Z,Desc`) as `Point` entities. World map: X=Easting, Y=Northing, Z=Elevation. |
 | `LS_SURFACE <path>` | ribbon file dialog | Build a TIN from a PNEZD or **LandXML** surface, draw it on `LS-TIN-<NAME>`, and retain it by name for later commands. |
+| `LS_LANDXML <path>` | ribbon file dialog | Import LandXML TIN surface(s) as **`Mesh`** entities on `LS-TIN-<NAME>` (retained by name for LS_VOLUME / LS_DATUM). `<P>` = `northing easting [elev]` → X=E/Y=N/Z=Z; units as-is; invisible `<F i="1">` faces skipped. Also handles the host's `LANDXMLIMPORT` verb so the Insert-tab button can dispatch LandXML import here (OpenCADStudio #157). |
 | `LS_VOLUME [<top> <bottom>] [grid] [draw]` | ribbon / command line | Earthwork cut/fill/net between two surfaces (by name — defaults to `top`/`bottom` — or file paths). Exact TIN overlay; optional grid method and drawn TINs + cut/fill line + label. |
 | `LS_DATUM <surface> <elev>` | command line | Cut/fill of one surface vs a horizontal datum, with the datum contour and a label. |
 | `LS_RTS <baseN> <baseE> <rot> <scale> [<toN> <toE>]` | command line | Rotate / Translate / Scale every entity about a base point. |

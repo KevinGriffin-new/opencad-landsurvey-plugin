@@ -20,6 +20,11 @@ CLI=./target/debug/landsurvey-cli
 | **Inverse** | *(inline coords)* | `$CLI inverse 1000 1000 1080 1100 --anim inverse.svg` |
 | **Resection** | [`resection-demo.csv`](resection-demo.csv) | `$CLI resect docs/examples/resection-demo.csv --anim resection.svg` |
 
+There is also a small LandXML TIN seed, [`surface-demo.landxml`](surface-demo.landxml)
+(5 points, 4 real triangles + one invisible `i="1"` face that must be skipped).
+In the app, `LS_LANDXML` imports it as a `Mesh`; the CLI builds the same TIN:
+`$CLI surface docs/examples/surface-demo.landxml` (reports 4 triangles, plan area 10000).
+
 Notes
 - `--teach` amplifies a near-grid transform (small rotation/scale) so the
   *operation* reads on screen, with an on-screen note; drop it for a faithful
