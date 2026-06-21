@@ -15,9 +15,9 @@ dependency; a headless `landsurvey-cli` exercises the same engine and dumps DXF.
 | `LS_VOLUME [<top> <bottom>] [grid] [draw]` | ribbon / command line | Earthwork cut/fill/net between two surfaces (by name — defaults to `top`/`bottom` — or file paths). Exact TIN overlay; optional grid method and drawn TINs + cut/fill line + label. |
 | `LS_DATUM <surface> <elev>` | command line | Cut/fill of one surface vs a horizontal datum, with the datum contour and a label. |
 | `LS_RTS <baseN> <baseE> <rot> <scale> [<toN> <toE>]` | command line | Rotate / Translate / Scale every entity about a base point. |
-| `LS_HELMERT <pairs> [apply\|stages]` | ribbon file dialog / command line | Least-squares 2-D conformal fit from control pairs (`srcN,srcE,dstN,dstE`); prints a 7-step report. `stages` draws the annotated transform stages; `apply` transforms the drawing. |
+| `LS_HELMERT <pairs> [apply\|stages\|anim\|teach]` | ribbon file dialog / command line | Least-squares 2-D conformal fit from control pairs (`srcN,srcE,dstN,dstE`); prints a 7-step report. `stages` draws the annotated transform stages; `apply` transforms the drawing; `anim`/`teach` export an animated-SVG explainer (`teach` amplifies near-grid fits). |
 | `LS_IMPORTPLAN <path>` | ribbon file dialog | Import recognized plan geometry (the `plan2cad` JSON) — lines / arcs / circles / texts onto their named layers. |
-| `LS_INVERSE <N1> <E1> <N2> <E2>` | command line | Distance + azimuth + quadrant bearing between two coordinates. |
+| `LS_INVERSE <N1> <E1> <N2> <E2> [anim]` | command line | Distance + azimuth + quadrant bearing between two coordinates; `anim` exports an animated-SVG explainer. |
 | `LS_LIST` | ribbon / command line | Count entities tagged with the `LANDSURVEY_POINT` record. |
 | `LS_HELLO` | command line | Print the available commands. |
 

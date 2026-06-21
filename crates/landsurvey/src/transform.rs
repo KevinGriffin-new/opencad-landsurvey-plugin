@@ -45,6 +45,22 @@ impl Conformal {
         (self.a * e - self.b * n + self.c, self.b * e + self.a * n + self.d)
     }
 
+    /// Decompose applying this transform to `(e, n)` into four geometric stages
+    /// about an arbitrary pivot `G`:
+    /// `[source, scaled-about-G, +rotated-about-G, +translated]`. Stage 3 always
+    /// equals `apply(e, n)`, so the decomposition is exact regardless of `G`
+    /// (it only changes which point stays fixed during scale/rotate).
+    pub fn stages_about(&self, e: f64, n: f64, pivot: (f64, f64)) -> [(f64, f64); 4] {
+        let s = self.scale();
+        let th = self.rotation_deg().to_radians();
+        let (gx, gy) = pivot;
+        let (dx, dy) = (e - gx, n - gy);
+        let p1 = (gx + s * dx, gy + s * dy);
+        let (sx, sy) = (s * dx, s * dy);
+        let p2 = (gx + th.cos() * sx - th.sin() * sy, gy + th.sin() * sx + th.cos() * sy);
+        [(e, n), p1, p2, self.apply(e, n)]
+    }
+
     /// Build a Rotate/Translate/Scale transform that pins `base_src` -> `base_dst`,
     /// rotates by `swing_deg` (CCW+), and scales by `scale` about the base.
     /// `base_dst == base_src` means rotate/scale in place (no translation);
@@ -94,27 +110,11 @@ impl HelmertSteps {
         self.transform.rotation_deg()
     }
 
-    /// The four geometric application stages for a source point, all equal to
-    /// the final fitted result at stage 3:
-    /// `[source, scaled-about-src-centroid, +rotated, +translated-to-target]`.
-    /// This decomposition *is* the fitted transform (the centroid maps to the
-    /// centroid), which is what makes it safe to teach with.
+    /// The four geometric application stages for a source point — scale and
+    /// rotate about the **source centroid**, then translate to the target
+    /// centroid. Stage 3 equals the full fitted transform.
     pub fn stages(&self, e: f64, n: f64) -> [(f64, f64); 4] {
-        let (gx, gy) = self.src_centroid;
-        let s = self.scale();
-        let th = self.rotation_deg().to_radians();
-        let (dx, dy) = (e - gx, n - gy);
-        // 1: scale about the source centroid.
-        let p1 = (gx + s * dx, gy + s * dy);
-        // 2: rotate (the scaled offset) about the source centroid.
-        let (sx, sy) = (s * dx, s * dy);
-        let rx = th.cos() * sx - th.sin() * sy;
-        let ry = th.sin() * sx + th.cos() * sy;
-        let p2 = (gx + rx, gy + ry);
-        // 3: translate so the source centroid lands on the target centroid
-        //    (identical to applying the full transform).
-        let p3 = self.transform.apply(e, n);
-        [(e, n), p1, p2, p3]
+        self.transform.stages_about(e, n, self.src_centroid)
     }
 }
 

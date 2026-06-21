@@ -17,6 +17,9 @@ exports the two C symbols the host loader expects (via
   **Helmert** fit from control pairs, with a 7-step explainer and annotated,
   drawn stages.
 - **Plan** — recognized-plan (`plan2cad` JSON) import.
+- **Animated SVG explainers** — Helmert / RTS / inverse can emit a self-contained
+  looping SVG that shows the operation step by step (with a `teach` mode that
+  amplifies near-grid transforms for classroom / outreach use).
 
 See [`PLUGIN.md`](PLUGIN.md) for the full command and XDATA reference.
 

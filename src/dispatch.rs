@@ -14,7 +14,7 @@ use crate::state::LandSurveyState;
 use crate::PLUGIN_ID;
 
 use landsurvey::surface::{self, Surface};
-use landsurvey::{cogo, landxml, plan, pnezd, transform};
+use landsurvey::{cogo, landxml, plan, pnezd, transform, viz};
 
 /// XDATA application carrying survey metadata on a `Point` entity.
 /// Record values: `[String(point_number), String(description)]`.
@@ -181,6 +181,27 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
         inv.azimuth_deg,
         cogo::azimuth_to_bearing(inv.azimuth_deg)
     ));
+    // `LS_INVERSE <N1> <E1> <N2> <E2> anim` → export an animated-SVG explainer.
+    if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("anim")) {
+        let svg = viz::inverse_anim_svg(nums[0], nums[1], nums[2], nums[3]);
+        write_anim_file(host, "inverse", &svg);
+    }
+}
+
+/// Write an animated-SVG explainer to a temp folder and report the path so the
+/// user can open it in a browser (OCS can't play animation in the canvas).
+fn write_anim_file(host: &mut dyn HostApi, op: &str, svg: &str) {
+    let mut path = std::env::temp_dir();
+    path.push("landsurvey-anim");
+    let _ = std::fs::create_dir_all(&path);
+    path.push(format!("{op}.svg"));
+    match std::fs::write(&path, svg) {
+        Ok(_) => host.push_output(&format!(
+            "LS animation -> {} (open in a browser)",
+            path.display()
+        )),
+        Err(e) => host.push_error(&format!("LS animation: cannot write SVG: {e}")),
+    }
 }
 
 /// `LS_SURFACE <points.csv>` — build a TIN from a PNEZD file and draw its
@@ -564,19 +585,24 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
         .unwrap_or("");
     if rest.is_empty() {
         host.push_info(
-            "Usage: LS_HELMERT <pairs_file> [apply|stages]  (lines: srcN, srcE, dstN, dstE; \
-             'stages' draws the transform steps, 'apply' transforms the drawing)",
+            "Usage: LS_HELMERT <pairs_file> [apply|stages|anim|teach]  (lines: srcN, srcE, dstN, \
+             dstE; 'stages' draws the steps, 'apply' transforms the drawing, 'anim'/'teach' export \
+             an animated SVG explainer)",
         );
         return;
     }
     // A trailing mode keyword (path may contain spaces, so strip from the end).
     let lower = rest.to_ascii_lowercase();
-    let (path, apply, stages) = if lower.ends_with(" apply") {
-        (rest[..rest.len() - 6].trim(), true, false)
+    let (path, apply, stages, anim, teach) = if lower.ends_with(" apply") {
+        (rest[..rest.len() - 6].trim(), true, false, false, false)
     } else if lower.ends_with(" stages") {
-        (rest[..rest.len() - 7].trim(), false, true)
+        (rest[..rest.len() - 7].trim(), false, true, false, false)
+    } else if lower.ends_with(" teach") {
+        (rest[..rest.len() - 6].trim(), false, false, true, true)
+    } else if lower.ends_with(" anim") {
+        (rest[..rest.len() - 5].trim(), false, false, true, false)
     } else {
-        (rest, false, false)
+        (rest, false, false, false, false)
     };
 
     let text = match fs::read_to_string(path) {
@@ -638,6 +664,13 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
         host.push_output(&format!(
             "LS_HELMERT: drew {n} stage entities (layers LS-HMT-0-SRC..3-FINAL, TARGET, RESID, PATH)."
         ));
+    }
+
+    if anim {
+        match viz::helmert_anim_svg(&pairs, teach) {
+            Ok(svg) => write_anim_file(host, "helmert", &svg),
+            Err(e) => host.push_error(&format!("LS_HELMERT: {e}")),
+        }
     }
 
     if apply {

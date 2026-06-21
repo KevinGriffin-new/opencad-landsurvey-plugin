@@ -18,9 +18,9 @@ USAGE:
   landsurvey-cli surface <points.csv|landxml> [-o out.dxf]
   landsurvey-cli volume  <top> <bottom> [--grid <step>] [-o out.dxf]
   landsurvey-cli datum   <surface> <elevation> [-o out.dxf]
-  landsurvey-cli rts     <points.csv> --base <N,E> [--to <N,E>] [--rot <deg>] [--scale <s>] [--csv out.csv] [-o out.dxf]
-  landsurvey-cli helmert <pairs.csv> [--apply <points.csv>] [--csv out.csv] [-o out.dxf]
-  landsurvey-cli inverse <N1> <E1> <N2> <E2>
+  landsurvey-cli rts     <points.csv> --base <N,E> [--to <N,E>] [--rot <deg>] [--scale <s>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
+  landsurvey-cli helmert <pairs.csv> [--apply <points.csv>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
+  landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
 LandXML (auto-detected). rts = Rotate/Translate/Scale about a base point (CCW+);
@@ -203,7 +203,7 @@ fn cmd_datum(args: &[String]) -> Result<String, String> {
 /// Rotate/Translate/Scale a PNEZD point set about a base point. Writes a DXF
 /// (source vs transformed points) and, with `--csv`, the transformed PNEZD.
 fn cmd_rts(args: &[String]) -> Result<String, String> {
-    let (pos, opts) = split_args(args, &["-o", "--out", "--csv", "--base", "--to", "--rot", "--scale"]);
+    let (pos, opts) = split_args(args, &["-o", "--out", "--csv", "--base", "--to", "--rot", "--scale", "--anim"]);
     let path = pos.first().ok_or("usage: rts <points.csv> --base <N,E> [--to <N,E>] [--rot deg] [--scale s]")?;
     let base = parse_ne(opts.get("base").ok_or("rts needs --base <N,E>")?)?; // (n, e)
     let to = match opts.get("to") {
@@ -247,17 +247,25 @@ fn cmd_rts(args: &[String]) -> Result<String, String> {
     if let Some(csv_path) = opts.get("csv") {
         write_file(csv_path, &csv)?;
     }
+    // Optional animated-SVG explainer (--teach amplifies small rot/scale).
+    if let Some(anim_path) = opts.get("anim") {
+        let teach = args.iter().any(|a| a == "--teach");
+        let pts: Vec<(f64, f64)> = parsed.points.iter().map(|p| (p.easting, p.northing)).collect();
+        let svg = landsurvey::viz::rts_anim_svg(&pts, &t, (base.1, base.0), teach);
+        write_file(anim_path, &svg)?;
+    }
 
     let (se, sn, de, dn) = first.unwrap();
     Ok(format!(
         "rts \"{name}\": {} pts, scale {:.6}, rotation {:.4}\u{b0} (CCW+), base ({:.3},{:.3})->({:.3},{:.3})\n\
-         e.g. (E {:.3}, N {:.3}) -> (E {:.3}, N {:.3})\nDXF -> {out}{}",
+         e.g. (E {:.3}, N {:.3}) -> (E {:.3}, N {:.3})\nDXF -> {out}{}{}",
         parsed.points.len(),
         t.scale(),
         t.rotation_deg(),
         base.0, base.1, to.0, to.1,
         se, sn, de, dn,
         opts.get("csv").map(|c| format!("; CSV -> {c}")).unwrap_or_default(),
+        opts.get("anim").map(|a| format!("; anim -> {a}")).unwrap_or_default(),
     ))
 }
 
@@ -267,12 +275,18 @@ fn cmd_rts(args: &[String]) -> Result<String, String> {
 /// -> rotated -> final, over the target, with residual vectors). `--apply`
 /// transforms a separate point set by the fitted transform.
 fn cmd_helmert(args: &[String]) -> Result<String, String> {
-    let (pos, opts) = split_args(args, &["-o", "--out", "--csv", "--apply"]);
-    let path = pos.first().ok_or("usage: helmert <pairs.csv> [--apply points.csv] [-o out.dxf]")?;
+    let (pos, opts) = split_args(args, &["-o", "--out", "--csv", "--apply", "--anim"]);
+    let path = pos.first().ok_or("usage: helmert <pairs.csv> [--apply points.csv] [--anim out.svg] [-o out.dxf]")?;
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     let pairs = transform::parse_control_pairs(&text);
     if pairs.len() < 2 {
         return Err(format!("\"{path}\" has {} control pair(s); need at least 2", pairs.len()));
+    }
+    // Optional animated-SVG explainer of the fit (--teach amplifies a near-grid fit).
+    if let Some(anim_path) = opts.get("anim") {
+        let teach = args.iter().any(|a| a == "--teach");
+        let svg = landsurvey::viz::helmert_anim_svg(&pairs, teach).map_err(|e| e.to_string())?;
+        write_file(anim_path, &svg)?;
     }
     let steps = transform::helmert_fit_explained(&pairs).map_err(|e| e.to_string())?;
     let t = steps.transform;
@@ -389,6 +403,9 @@ fn cmd_helmert(args: &[String]) -> Result<String, String> {
     let name = stem(path);
     let out = opt(&opts).unwrap_or_else(|| format!("{}_helmert.dxf", name.to_lowercase()));
     write_file(&out, &d.build())?;
+    if let Some(anim_path) = opts.get("anim") {
+        report.push_str(&format!("\nanimation -> {anim_path}"));
+    }
     Ok(format!("{report}\nDXF (stages) -> {out}"))
 }
 
@@ -400,19 +417,26 @@ fn parse_ne(s: &str) -> Result<(f64, f64), String> {
     Ok((n, e))
 }
 
-/// `inverse <N1> <E1> <N2> <E2>` — distance + azimuth + quadrant bearing.
+/// `inverse <N1> <E1> <N2> <E2> [--anim out.svg]` — distance + azimuth + bearing.
 fn cmd_inverse(args: &[String]) -> Result<String, String> {
-    let n: Vec<f64> = args.iter().filter_map(|a| a.parse().ok()).collect();
+    let (pos, opts) = split_args(args, &["--anim", "-o", "--out"]);
+    let n: Vec<f64> = pos.iter().filter_map(|a| a.parse().ok()).collect();
     if n.len() < 4 {
-        return Err("usage: inverse <N1> <E1> <N2> <E2>".to_string());
+        return Err("usage: inverse <N1> <E1> <N2> <E2> [--anim out.svg]".to_string());
     }
     let inv = cogo::inverse(n[0], n[1], n[2], n[3]);
-    Ok(format!(
+    let mut msg = format!(
         "distance {:.4}, azimuth {:.4}\u{b0}, bearing {}",
         inv.distance,
         inv.azimuth_deg,
         cogo::azimuth_to_bearing(inv.azimuth_deg)
-    ))
+    );
+    if let Some(anim_path) = opt(&opts).or_else(|| opts.get("anim").cloned()) {
+        let svg = landsurvey::viz::inverse_anim_svg(n[0], n[1], n[2], n[3]);
+        write_file(&anim_path, &svg)?;
+        msg.push_str(&format!("\nanim -> {anim_path}"));
+    }
+    Ok(msg)
 }
 
 // --- helpers -----------------------------------------------------------------

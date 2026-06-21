@@ -12,3 +12,4 @@ pub mod plan;
 pub mod pnezd;
 pub mod surface;
 pub mod transform;
+pub mod viz;
