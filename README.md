@@ -23,9 +23,11 @@ exports the two C symbols the host loader expects (via
   known point, and residuals. See [`docs/resection-design.md`](docs/resection-design.md)
   and the [`docs/examples/resection-demo.csv`](docs/examples/resection-demo.csv) seed.
 - **Plan** — recognized-plan (`plan2cad` JSON) import.
-- **Animated SVG explainers** — Helmert / RTS / inverse can emit a self-contained
-  looping SVG that shows the operation step by step (with a `teach` mode that
-  amplifies near-grid transforms for classroom / outreach use).
+- **Animated SVG explainers** — Helmert / RTS / inverse / resection can emit a
+  self-contained looping SVG that shows the operation step by step (with a
+  `teach` mode that amplifies near-grid transforms for classroom / outreach
+  use). Each is data-driven from real input; reproducible seeds and the exact
+  regeneration commands are in [`docs/examples/`](docs/examples/README.md).
 
 See [`PLUGIN.md`](PLUGIN.md) for the full command and XDATA reference.
 

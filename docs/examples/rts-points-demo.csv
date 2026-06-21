@@ -1,0 +1,8 @@
+# RTS demo — a small parcel as PNEZD points (P, N, E, Z, Desc).
+# Seeds the Rotate/Translate/Scale explainer SVG; the transform is given on the
+# command line (base/to/rot/scale) — see docs/examples/README.md.
+1, 1000, 1000, 0, COR
+2, 1000, 1100, 0, COR
+3, 1080, 1100, 0, COR
+4, 1080, 1000, 0, COR
+5, 1040, 1050, 0, CTR

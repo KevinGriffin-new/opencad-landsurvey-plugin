@@ -1,0 +1,7 @@
+# Helmert demo — least-squares 2-D conformal fit from control pairs.
+# Seeds the Helmert explainer SVG. Columns: srcN, srcE, dstN, dstE (local -> grid).
+# Expected fit: scale ~1.0, small rotation; see docs/examples/README.md for the command.
+1000.0000, 1000.0000, 4014.4730, 5986.5319
+1000.0000, 1400.0000, 4020.0612, 6386.7329
+1300.0000, 1400.0000, 4320.1220, 6382.6617
+1300.0000, 1000.0000, 4314.6238, 5982.3407

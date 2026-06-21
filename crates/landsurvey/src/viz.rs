@@ -144,6 +144,92 @@ pub fn inverse_anim_svg(n1: f64, e1: f64, n2: f64, e2: f64) -> String {
 }
 
 // =====================================================================
+// Resection (free-station: known control fixed, station converges)
+// =====================================================================
+
+/// Animated SVG of a resection: the known control points stay fixed while the
+/// occupied station converges from a first guess (the control centroid) to its
+/// solved position, the rays following. Reveals the solved coordinate.
+/// `knowns` are `(E, N)`, `names` the parallel labels, `station` the solved
+/// `(E, N)`, and `caption` a one-line summary (method / orientation / RMS).
+pub fn resection_anim_svg(
+    knowns: &[(f64, f64)],
+    names: &[&str],
+    station: (f64, f64),
+    caption: &str,
+) -> String {
+    // Provisional start = centroid of the known control.
+    let n = (knowns.len().max(1)) as f64;
+    let cen = (
+        knowns.iter().map(|p| p.0).sum::<f64>() / n,
+        knowns.iter().map(|p| p.1).sum::<f64>() / n,
+    );
+    let mut all: Vec<(f64, f64)> = knowns.to_vec();
+    all.push(station);
+    all.push(cen);
+    let vp = Viewport::fit(&all);
+    let kt = key_times_str();
+
+    // Station path across the 6 frames: guess · guess · halfway · solved · hold · back.
+    let mid = ((cen.0 + station.0) / 2.0, (cen.1 + station.1) / 2.0);
+    let path = [cen, cen, mid, station, station, cen];
+    let sx: Vec<String> = path.iter().map(|&p| format!("{:.1}", vp.map(p).0)).collect();
+    let sy: Vec<String> = path.iter().map(|&p| format!("{:.1}", vp.map(p).1)).collect();
+    let (sxv, syv) = (sx.join(";"), sy.join(";"));
+
+    let mut svg = svg_head(
+        "Animated resection",
+        "Known control stays fixed; the occupied station converges from a guess to its solved position, rays following.",
+    );
+
+    // Rays: the station end animates along the path; the known end is fixed.
+    for &k in knowns {
+        let (kx, ky) = vp.map(k);
+        svg.push_str(&format!(
+            "<line x2=\"{kx:.1}\" y2=\"{ky:.1}\" stroke=\"var(--muted)\" stroke-width=\"1.3\">\
+             <animate attributeName=\"x1\" dur=\"{DUR_S}s\" repeatCount=\"indefinite\" keyTimes=\"{kt}\" values=\"{sxv}\"/>\
+             <animate attributeName=\"y1\" dur=\"{DUR_S}s\" repeatCount=\"indefinite\" keyTimes=\"{kt}\" values=\"{syv}\"/></line>\n"
+        ));
+    }
+
+    // Fixed known control points (green) + labels.
+    for (i, &k) in knowns.iter().enumerate() {
+        let (kx, ky) = vp.map(k);
+        svg.push_str(&format!("<circle cx=\"{kx:.1}\" cy=\"{ky:.1}\" r=\"4\" fill=\"#2ea043\"/>\n"));
+        if let Some(name) = names.get(i) {
+            svg.push_str(&format!(
+                "<text x=\"{:.1}\" y=\"{:.1}\" font-size=\"12\" fill=\"var(--muted)\">{}</text>\n",
+                kx + 7.0, ky - 7.0, xml_escape(name)
+            ));
+        }
+    }
+
+    // The converging station dot (red).
+    svg.push_str(&format!(
+        "<circle r=\"4.5\" fill=\"#d83b3b\">\
+         <animate attributeName=\"cx\" dur=\"{DUR_S}s\" repeatCount=\"indefinite\" keyTimes=\"{kt}\" values=\"{sxv}\"/>\
+         <animate attributeName=\"cy\" dur=\"{DUR_S}s\" repeatCount=\"indefinite\" keyTimes=\"{kt}\" values=\"{syv}\"/></circle>\n"
+    ));
+
+    // Top caption: "solving" early, the solved coordinate once converged.
+    svg.push_str("<g text-anchor=\"middle\" font-size=\"14\" font-weight=\"600\">\n");
+    svg.push_str(&format!(
+        "<text x=\"{:.0}\" y=\"28\" fill=\"var(--muted)\">resection — solving station\
+         <animate attributeName=\"opacity\" dur=\"{DUR_S}s\" repeatCount=\"indefinite\" keyTimes=\"{kt}\" values=\"1;1;1;0;0;1\"/></text>\n",
+        W / 2.0
+    ));
+    svg.push_str(&format!(
+        "<text x=\"{:.0}\" y=\"28\" fill=\"#d83b3b\">STA  E {:.3}  N {:.3}\
+         <animate attributeName=\"opacity\" dur=\"{DUR_S}s\" repeatCount=\"indefinite\" keyTimes=\"{kt}\" values=\"0;0;0;1;1;0\"/></text>\n",
+        W / 2.0, station.0, station.1
+    ));
+    svg.push_str("</g>\n");
+    svg.push_str(&subtitle(caption));
+    svg.push_str("</svg>\n");
+    svg
+}
+
+// =====================================================================
 // shared morph engine
 // =====================================================================
 
@@ -404,6 +490,16 @@ mod tests {
         assert!(rts.contains("Rotate") && rts.contains("<animate"));
         let inv = inverse_anim_svg(0.0, 0.0, 100.0, 100.0);
         assert!(inv.contains("bearing") && inv.contains("stroke-dashoffset"));
+    }
+
+    #[test]
+    fn resection_anim_wellformed() {
+        let knowns = [(5300.0, 4400.0), (4600.0, 4350.0), (5100.0, 3500.0)];
+        let names = ["CP1", "CP2", "CP3"];
+        let svg = resection_anim_svg(&knowns, &names, (5000.0, 4000.0), "combined · orient 20.000°");
+        assert!(svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"));
+        assert!(svg.contains("STA") && svg.contains("<animate"));
+        assert!(svg.contains("CP1") && svg.contains("CP3"));
     }
 
     #[test]

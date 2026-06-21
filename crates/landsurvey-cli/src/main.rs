@@ -418,8 +418,8 @@ fn cmd_helmert(args: &[String]) -> Result<String, String> {
 /// three-point (Tienstra) for exactly 3 angle shots. Draws the station, a ray to
 /// each known point (labeled with its residual), and a result label.
 fn cmd_resect(args: &[String]) -> Result<String, String> {
-    let (pos, opts) = split_args(args, &["-o", "--out"]);
-    let path = pos.first().ok_or("usage: resect <shots.csv> [-o out.dxf]")?;
+    let (pos, opts) = split_args(args, &["-o", "--out", "--anim"]);
+    let path = pos.first().ok_or("usage: resect <shots.csv> [--anim out.svg] [-o out.dxf]")?;
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     let shots = resection::parse_resection_shots(&text);
     if shots.len() < 2 {
@@ -435,7 +435,7 @@ fn cmd_resect(args: &[String]) -> Result<String, String> {
     d.add_layer("LS-RESECT-LABEL", 7); // white
 
     // Combined when there are >=2 distance shots; otherwise angle-only 3-point.
-    let station: (f64, f64) = if with_dist >= 2 {
+    let (station, caption): ((f64, f64), String) = if with_dist >= 2 {
         let r = resection::resection_combined(&shots).map_err(|e| e.to_string())?;
         report.push_str(&format!(
             "  method        : combined (direction + distance, least-squares)\n\
@@ -455,7 +455,11 @@ fn cmd_resect(args: &[String]) -> Result<String, String> {
         for (name, res) in &r.residuals {
             report.push_str(&format!("\n            {name:>6}: {res:.5}"));
         }
-        r.station
+        let cap = format!(
+            "combined resection \u{b7} orient {:.3}\u{b0} \u{b7} scale {:.5} \u{b7} RMS {:.4}",
+            r.orientation_deg, r.scale, r.rms
+        );
+        (r.station, cap)
     } else if shots.len() == 3 {
         // Angle-only Tienstra. Subtended angles at P from the three readings.
         let a = shots[0].known;
@@ -471,7 +475,7 @@ fn cmd_resect(args: &[String]) -> Result<String, String> {
              \u{20}\u{20}subtended     : BPC {:.4}\u{b0}, CPA {:.4}\u{b0}, APB {:.4}\u{b0}",
             p.0, p.1, ang[0], ang[1], ang[2]
         ));
-        p
+        (p, "angle-only three-point (Tienstra)".to_string())
     } else {
         return Err(format!(
             "need >=2 distance shots (combined) or exactly 3 angle shots (three-point); \
@@ -501,6 +505,15 @@ fn cmd_resect(args: &[String]) -> Result<String, String> {
     let name = stem(path);
     let out = opt(&opts).unwrap_or_else(|| format!("{}_resect.dxf", name.to_lowercase()));
     write_file(&out, &d.build())?;
+
+    // Optional animated-SVG explainer: known control fixed, station converges.
+    if let Some(anim_path) = opts.get("anim") {
+        let knowns: Vec<(f64, f64)> = shots.iter().map(|s| s.known).collect();
+        let names: Vec<&str> = shots.iter().map(|s| s.name.as_str()).collect();
+        let svg = landsurvey::viz::resection_anim_svg(&knowns, &names, station, &caption);
+        write_file(anim_path, &svg)?;
+        report.push_str(&format!("\nanim -> {anim_path}"));
+    }
     Ok(format!("{report}\nDXF -> {out}"))
 }
 

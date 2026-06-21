@@ -702,14 +702,20 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
 /// three-point (Tienstra). Draws the station, a ray to each known point, and a
 /// label. CSV lines: `knownN, knownE, direction_deg[, distance][, name]`.
 fn resect(host: &mut dyn HostApi, cmd: &str) {
-    let arg = first_arg(cmd);
-    if arg.is_empty() {
+    let rest = first_arg(cmd);
+    if rest.is_empty() {
         host.push_info(
-            "Usage: LS_RESECT <shots.csv>  (lines: knownN, knownE, direction_deg, distance, name; \
-             blank distance = angle-only)",
+            "Usage: LS_RESECT <shots.csv> [anim]  (lines: knownN, knownE, direction_deg, distance, \
+             name; blank distance = angle-only; 'anim' exports an animated-SVG explainer)",
         );
         return;
     }
+    // A trailing `anim` keyword exports the explainer (path may contain spaces).
+    let (arg, want_anim) = if rest.to_ascii_lowercase().ends_with(" anim") {
+        (rest[..rest.len() - 5].trim(), true)
+    } else {
+        (rest, false)
+    };
     let text = match fs::read_to_string(arg) {
         Ok(t) => t,
         Err(e) => {
@@ -728,7 +734,7 @@ fn resect(host: &mut dyn HostApi, cmd: &str) {
     let with_dist = shots.iter().filter(|s| s.distance.is_some()).count();
 
     // Solve: combined (≥2 distances) else angle-only three-point (exactly 3).
-    let station: (f64, f64) = if with_dist >= 2 {
+    let (station, caption): ((f64, f64), String) = if with_dist >= 2 {
         let r = match resection::resection_combined(&shots) {
             Ok(r) => r,
             Err(e) => {
@@ -755,7 +761,11 @@ fn resect(host: &mut dyn HostApi, cmd: &str) {
         for (name, res) in r.residuals.iter().take(12) {
             host.push_output(&format!("            {name:>6}: {res:.5}"));
         }
-        r.station
+        let cap = format!(
+            "combined resection \u{b7} orient {:.3}\u{b0} \u{b7} scale {:.5} \u{b7} RMS {:.4}",
+            r.orientation_deg, r.scale, r.rms
+        );
+        (r.station, cap)
     } else if shots.len() == 3 {
         let (a, b, c) = (shots[0].known, shots[1].known, shots[2].known);
         let sep = |x: f64, y: f64| (x - y).rem_euclid(360.0).min((y - x).rem_euclid(360.0));
@@ -774,7 +784,7 @@ fn resect(host: &mut dyn HostApi, cmd: &str) {
             "  subtended     : BPC {:.4}\u{b0}, CPA {:.4}\u{b0}, APB {:.4}\u{b0}",
             ang[0], ang[1], ang[2]
         ));
-        p
+        (p, "angle-only three-point (Tienstra)".to_string())
     } else {
         host.push_error(&format!(
             "LS_RESECT: need >=2 distance shots (combined) or exactly 3 angle shots \
@@ -836,6 +846,14 @@ fn resect(host: &mut dyn HostApi, cmd: &str) {
         "LS_RESECT: drew station + {} ray(s) (layers LS-RESECT-STATION/KNOWN/RAYS/LABEL).",
         shots.len()
     ));
+
+    // Optional animated-SVG explainer (known control fixed, station converges).
+    if want_anim {
+        let knowns: Vec<(f64, f64)> = shots.iter().map(|s| s.known).collect();
+        let names: Vec<&str> = shots.iter().map(|s| s.name.as_str()).collect();
+        let svg = viz::resection_anim_svg(&knowns, &names, station, &caption);
+        write_anim_file(host, "resection", &svg);
+    }
 }
 
 /// Draw the Helmert application as discrete stages so the transform can be seen:
