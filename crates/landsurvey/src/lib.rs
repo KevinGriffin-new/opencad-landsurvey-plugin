@@ -10,6 +10,7 @@ pub mod dxf;
 pub mod landxml;
 pub mod plan;
 pub mod pnezd;
+pub mod resection;
 pub mod surface;
 pub mod transform;
 pub mod viz;

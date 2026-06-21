@@ -14,7 +14,7 @@ use crate::state::LandSurveyState;
 use crate::PLUGIN_ID;
 
 use landsurvey::surface::{self, Surface};
-use landsurvey::{cogo, landxml, plan, pnezd, transform, viz};
+use landsurvey::{cogo, landxml, plan, pnezd, resection, transform, viz};
 
 /// XDATA application carrying survey metadata on a `Point` entity.
 /// Record values: `[String(point_number), String(description)]`.
@@ -74,6 +74,10 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
         }
         "LS_HELMERT" => {
             helmert(host, cmd);
+            true
+        }
+        "LS_RESECT" => {
+            resect(host, cmd);
             true
         }
         "LS_LIST" => {
@@ -690,6 +694,148 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
         host.set_dirty();
         host.push_output(&format!("LS_HELMERT: applied fit to {count} entit{}.", if count == 1 { "y" } else { "ies" }));
     }
+}
+
+/// `LS_RESECT <shots.csv>` — free-station resection. Solves the occupied
+/// (unknown) point from shots to known control: combined (direction + distance,
+/// least-squares similarity) when ≥2 shots carry distances, else angle-only
+/// three-point (Tienstra). Draws the station, a ray to each known point, and a
+/// label. CSV lines: `knownN, knownE, direction_deg[, distance][, name]`.
+fn resect(host: &mut dyn HostApi, cmd: &str) {
+    let arg = first_arg(cmd);
+    if arg.is_empty() {
+        host.push_info(
+            "Usage: LS_RESECT <shots.csv>  (lines: knownN, knownE, direction_deg, distance, name; \
+             blank distance = angle-only)",
+        );
+        return;
+    }
+    let text = match fs::read_to_string(arg) {
+        Ok(t) => t,
+        Err(e) => {
+            host.push_error(&format!("LS_RESECT: cannot read \"{arg}\": {e}"));
+            return;
+        }
+    };
+    let shots = resection::parse_resection_shots(&text);
+    if shots.len() < 2 {
+        host.push_error(&format!(
+            "LS_RESECT: \"{arg}\" has {} usable shot(s); need at least 2.",
+            shots.len()
+        ));
+        return;
+    }
+    let with_dist = shots.iter().filter(|s| s.distance.is_some()).count();
+
+    // Solve: combined (≥2 distances) else angle-only three-point (exactly 3).
+    let station: (f64, f64) = if with_dist >= 2 {
+        let r = match resection::resection_combined(&shots) {
+            Ok(r) => r,
+            Err(e) => {
+                host.push_error(&format!("LS_RESECT: {e}"));
+                return;
+            }
+        };
+        host.push_output("LS_RESECT — combined (direction + distance, least-squares):");
+        host.push_output(&format!("  station (E,N) : {:.4}, {:.4}", r.station.0, r.station.1));
+        host.push_output(&format!(
+            "  orientation   : {:.4}\u{b0}  (grid azimuth = reading + orientation)",
+            r.orientation_deg
+        ));
+        host.push_output(&format!(
+            "  scale check   : {:.8}{}",
+            r.scale,
+            if r.scale_blunder(1e-3) {
+                "  <-- WARNING: strays from 1.0 (distance/EDM blunder?)"
+            } else {
+                ""
+            }
+        ));
+        host.push_output(&format!("  residuals RMS : {:.5} ({} shots)", r.rms, r.residuals.len()));
+        for (name, res) in r.residuals.iter().take(12) {
+            host.push_output(&format!("            {name:>6}: {res:.5}"));
+        }
+        r.station
+    } else if shots.len() == 3 {
+        let (a, b, c) = (shots[0].known, shots[1].known, shots[2].known);
+        let sep = |x: f64, y: f64| (x - y).rem_euclid(360.0).min((y - x).rem_euclid(360.0));
+        let (ra, rb, rc) = (shots[0].direction_deg, shots[1].direction_deg, shots[2].direction_deg);
+        let ang = [sep(rb, rc), sep(rc, ra), sep(ra, rb)]; // [∠BPC, ∠CPA, ∠APB]
+        let p = match resection::resection_three_point(a, b, c, ang) {
+            Ok(p) => p,
+            Err(e) => {
+                host.push_error(&format!("LS_RESECT: {e}"));
+                return;
+            }
+        };
+        host.push_output("LS_RESECT — angle-only three-point (Tienstra):");
+        host.push_output(&format!("  station (E,N) : {:.4}, {:.4}", p.0, p.1));
+        host.push_output(&format!(
+            "  subtended     : BPC {:.4}\u{b0}, CPA {:.4}\u{b0}, APB {:.4}\u{b0}",
+            ang[0], ang[1], ang[2]
+        ));
+        p
+    } else {
+        host.push_error(&format!(
+            "LS_RESECT: need >=2 distance shots (combined) or exactly 3 angle shots \
+             (three-point); got {} shots, {with_dist} with distances.",
+            shots.len()
+        ));
+        return;
+    };
+
+    // Survey points need a visible point style.
+    {
+        let header = &mut host.document_mut().header;
+        if header.point_display_mode == 0 {
+            header.point_display_mode = 3;
+        }
+        if header.point_display_size == 0.0 {
+            header.point_display_size = 5.0;
+        }
+    }
+
+    host.push_undo("LS_RESECT draw");
+    add_on_layer(
+        host,
+        EntityType::Point(CadPoint::at(Vector3::new(station.0, station.1, 0.0))),
+        "LS-RESECT-STATION",
+    );
+    let mut spread = 0.0_f64;
+    for s in &shots {
+        add_on_layer(
+            host,
+            EntityType::Point(CadPoint::at(Vector3::new(s.known.0, s.known.1, 0.0))),
+            "LS-RESECT-KNOWN",
+        );
+        add_on_layer(
+            host,
+            EntityType::Line(Line::from_points(
+                Vector3::new(station.0, station.1, 0.0),
+                Vector3::new(s.known.0, s.known.1, 0.0),
+            )),
+            "LS-RESECT-RAYS",
+        );
+        spread = spread.max((s.known.0 - station.0).hypot(s.known.1 - station.1));
+    }
+    let h = (spread / 30.0).max(1.0);
+    add_on_layer(
+        host,
+        EntityType::Text(
+            Text::with_value(
+                format!("STA E{:.3} N{:.3}", station.0, station.1),
+                Vector3::new(station.0 + h, station.1 + h, 0.0),
+            )
+            .with_height(h),
+        ),
+        "LS-RESECT-LABEL",
+    );
+    host.bump_geometry();
+    host.set_dirty();
+    host.push_output(&format!(
+        "LS_RESECT: drew station + {} ray(s) (layers LS-RESECT-STATION/KNOWN/RAYS/LABEL).",
+        shots.len()
+    ));
 }
 
 /// Draw the Helmert application as discrete stages so the transform can be seen:

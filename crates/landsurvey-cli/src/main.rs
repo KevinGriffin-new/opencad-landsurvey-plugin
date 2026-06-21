@@ -9,6 +9,7 @@ use std::fs;
 use landsurvey::dxf::DxfBuilder;
 use landsurvey::surface::{self, Surface};
 use landsurvey::transform::{self, Conformal};
+use landsurvey::resection;
 use landsurvey::{cogo, landxml, pnezd};
 
 const USAGE: &str = "\
@@ -20,6 +21,7 @@ USAGE:
   landsurvey-cli datum   <surface> <elevation> [-o out.dxf]
   landsurvey-cli rts     <points.csv> --base <N,E> [--to <N,E>] [--rot <deg>] [--scale <s>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
   landsurvey-cli helmert <pairs.csv> [--apply <points.csv>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
+  landsurvey-cli resect  <shots.csv> [-o out.dxf]
   landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
@@ -48,6 +50,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "datum" => cmd_datum(&args[1..]),
         "rts" => cmd_rts(&args[1..]),
         "helmert" => cmd_helmert(&args[1..]),
+        "resect" => cmd_resect(&args[1..]),
         "inverse" => cmd_inverse(&args[1..]),
         "" | "-h" | "--help" | "help" => Ok(USAGE.to_string()),
         other => Err(format!("unknown subcommand \"{other}\"\n\n{USAGE}")),
@@ -407,6 +410,98 @@ fn cmd_helmert(args: &[String]) -> Result<String, String> {
         report.push_str(&format!("\nanimation -> {anim_path}"));
     }
     Ok(format!("{report}\nDXF (stages) -> {out}"))
+}
+
+/// `resect <shots.csv> [-o out.dxf]` — free-station resection. Solves the
+/// occupied (unknown) point from shots to known control: combined (direction +
+/// distance, least-squares) when ≥2 shots carry distances, else angle-only
+/// three-point (Tienstra) for exactly 3 angle shots. Draws the station, a ray to
+/// each known point (labeled with its residual), and a result label.
+fn cmd_resect(args: &[String]) -> Result<String, String> {
+    let (pos, opts) = split_args(args, &["-o", "--out"]);
+    let path = pos.first().ok_or("usage: resect <shots.csv> [-o out.dxf]")?;
+    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let shots = resection::parse_resection_shots(&text);
+    if shots.len() < 2 {
+        return Err(format!("\"{path}\" has {} usable shot(s); need at least 2", shots.len()));
+    }
+    let with_dist = shots.iter().filter(|s| s.distance.is_some()).count();
+
+    let mut report = String::from("resect — free-station resection\n");
+    let mut d = DxfBuilder::new();
+    d.add_layer("LS-RESECT-STATION", 1); // red
+    d.add_layer("LS-RESECT-KNOWN", 3); // green
+    d.add_layer("LS-RESECT-RAYS", 8); // gray
+    d.add_layer("LS-RESECT-LABEL", 7); // white
+
+    // Combined when there are >=2 distance shots; otherwise angle-only 3-point.
+    let station: (f64, f64) = if with_dist >= 2 {
+        let r = resection::resection_combined(&shots).map_err(|e| e.to_string())?;
+        report.push_str(&format!(
+            "  method        : combined (direction + distance, least-squares)\n\
+             \u{20}\u{20}station (E,N) : {:.4}, {:.4}\n\
+             \u{20}\u{20}orientation   : {:.4}\u{b0}  (grid azimuth = reading + orientation)\n\
+             \u{20}\u{20}scale check   : {:.8}{}\n\
+             \u{20}\u{20}residuals     : RMS {:.5} ({} shot{})",
+            r.station.0,
+            r.station.1,
+            r.orientation_deg,
+            r.scale,
+            if r.scale_blunder(1e-3) { "   <-- WARNING: strays from 1.0 (distance/EDM blunder?)" } else { "" },
+            r.rms,
+            r.residuals.len(),
+            if r.residuals.len() == 1 { "" } else { "s" },
+        ));
+        for (name, res) in &r.residuals {
+            report.push_str(&format!("\n            {name:>6}: {res:.5}"));
+        }
+        r.station
+    } else if shots.len() == 3 {
+        // Angle-only Tienstra. Subtended angles at P from the three readings.
+        let a = shots[0].known;
+        let b = shots[1].known;
+        let c = shots[2].known;
+        let sep = |x: f64, y: f64| (x - y).rem_euclid(360.0).min((y - x).rem_euclid(360.0));
+        let (ra, rb, rc) = (shots[0].direction_deg, shots[1].direction_deg, shots[2].direction_deg);
+        let ang = [sep(rb, rc), sep(rc, ra), sep(ra, rb)]; // [∠BPC, ∠CPA, ∠APB]
+        let p = resection::resection_three_point(a, b, c, ang).map_err(|e| e.to_string())?;
+        report.push_str(&format!(
+            "  method        : angle-only three-point (Tienstra)\n\
+             \u{20}\u{20}station (E,N) : {:.4}, {:.4}\n\
+             \u{20}\u{20}subtended     : BPC {:.4}\u{b0}, CPA {:.4}\u{b0}, APB {:.4}\u{b0}",
+            p.0, p.1, ang[0], ang[1], ang[2]
+        ));
+        p
+    } else {
+        return Err(format!(
+            "need >=2 distance shots (combined) or exactly 3 angle shots (three-point); \
+             got {} shots, {with_dist} with distances",
+            shots.len()
+        ));
+    };
+
+    // Draw: station, known points, rays, and a label.
+    d.point("LS-RESECT-STATION", [station.0, station.1, 0.0]);
+    for s in &shots {
+        d.point("LS-RESECT-KNOWN", [s.known.0, s.known.1, 0.0]);
+        d.line("LS-RESECT-RAYS", [station.0, station.1, 0.0], [s.known.0, s.known.1, 0.0]);
+    }
+    let spread = shots
+        .iter()
+        .map(|s| (s.known.0 - station.0).hypot(s.known.1 - station.1))
+        .fold(0.0_f64, f64::max);
+    let h = (spread / 30.0).max(1.0);
+    d.text(
+        "LS-RESECT-LABEL",
+        [station.0 + h, station.1 + h, 0.0],
+        h,
+        &format!("STA E{:.3} N{:.3}", station.0, station.1),
+    );
+
+    let name = stem(path);
+    let out = opt(&opts).unwrap_or_else(|| format!("{}_resect.dxf", name.to_lowercase()));
+    write_file(&out, &d.build())?;
+    Ok(format!("{report}\nDXF -> {out}"))
 }
 
 /// Parse an `N,E` pair (northing,easting) into `(n, e)`.

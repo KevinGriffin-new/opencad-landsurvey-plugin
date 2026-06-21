@@ -1,0 +1,8 @@
+# Resection demo — occupy an UNKNOWN point P, shoot 3 KNOWN control points.
+# Reproduces the resection explainer; feeds `landsurvey-cli resect` and LS_RESECT.
+# Truth: station E5000.000 N4000.000, orientation +20.000 deg, scale 1.000000.
+# columns: knownN, knownE, direction_deg, distance, name
+#   (blank distance field -> that shot is angle-only)
+4400.0000, 5300.0000, 16.8699, 500.0000, CP1
+4350.0000, 4600.0000, 291.1859, 531.5073, CP2
+3500.0000, 5100.0000, 148.6901, 509.9020, CP3

@@ -16,6 +16,12 @@ exports the two C symbols the host loader expects (via
 - **Transform** — **RTS** (rotate / translate / scale) and a least-squares
   **Helmert** fit from control pairs, with a 7-step explainer and annotated,
   drawn stages.
+- **Resection** — free-station: solve an occupied (unknown) point from shots to
+  known control — **combined** (direction + distance, least-squares; reuses the
+  Helmert engine, with an EDM scale check) or **angle-only** three-point
+  (Tienstra, with danger-circle detection). Draws the station, rays to each
+  known point, and residuals. See [`docs/resection-design.md`](docs/resection-design.md)
+  and the [`docs/examples/resection-demo.csv`](docs/examples/resection-demo.csv) seed.
 - **Plan** — recognized-plan (`plan2cad` JSON) import.
 - **Animated SVG explainers** — Helmert / RTS / inverse can emit a self-contained
   looping SVG that shows the operation step by step (with a `teach` mode that
