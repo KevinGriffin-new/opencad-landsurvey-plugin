@@ -28,7 +28,7 @@ jobs:
             asset: opencad.landsurvey-macos-aarch64.dylib
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
       - name: Stage release asset
@@ -39,7 +39,7 @@ jobs:
           # the host loader accepts any name with the right extension.
           cp target/release/*.${{ matrix.ext }} "dist/${{ matrix.asset }}"
           cp plugin.toml dist/plugin.toml
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/${{ matrix.asset }}
