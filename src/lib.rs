@@ -24,7 +24,7 @@ pub const PLUGIN_ID: &str = "opencad.landsurvey";
 static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN_ID,
     name: "Land Survey",
-    version: "0.3.0",
+    version: "0.3.1",
     description: "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, coordinate transforms (RTS / Helmert), and animated SVG explainers",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 50,
