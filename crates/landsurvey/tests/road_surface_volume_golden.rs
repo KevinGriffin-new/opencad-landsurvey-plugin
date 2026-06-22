@@ -20,10 +20,20 @@
 use landsurvey::landxml;
 
 const XML: &str = include_str!("fixtures/road_surface.landxml");
+// A second, genuinely different terrain: the same points/faces with Z pulled
+// 0.6x toward the mean elevation (a non-planar "compressed" surface that
+// crosses Road Surface). Used for the terrain-vs-terrain volume golden.
+const XML_COMPRESSED: &str = include_str!("fixtures/road_compressed.landxml");
 
 fn road_surface() -> landsurvey::surface::Surface {
     landxml::read_first_surface(XML)
         .expect("road_surface.landxml should contain a TIN surface")
+        .surface
+}
+
+fn road_compressed() -> landsurvey::surface::Surface {
+    landxml::read_first_surface(XML_COMPRESSED)
+        .expect("road_compressed.landxml should contain a TIN surface")
         .surface
 }
 
@@ -89,4 +99,23 @@ fn surface_to_surface_overlay_matches_civil3d_and_datum() {
     let (datum, _) = road.cut_fill_to_datum_detailed(1190.0);
     assert!((det.cut_fill.cut - datum.cut).abs() < 1.0, "s2s vs datum cut: {} vs {}", det.cut_fill.cut, datum.cut);
     assert!((det.cut_fill.fill - datum.fill).abs() < 1.0, "s2s vs datum fill: {} vs {}", det.cut_fill.fill, datum.fill);
+}
+
+#[test]
+fn terrain_vs_terrain_matches_civil3d() {
+    // The real surface->surface case: two non-planar terrains that cross.
+    // Comparison = Road Surface, base = the compressed copy (identical footprint
+    // & triangulation, Z pulled toward the mean — so it crosses Road Surface;
+    // ~363 cut/fill-line segments). Captured from Civil 3D 2026 via the v40
+    // bridge surface_volume (base_surface mode): volume = comparison - base, so
+    // C3D FillVolume = Road ABOVE compressed (our cut), CutVolume = BELOW.
+    let road = road_surface();
+    let comp = road_compressed();
+    assert_eq!(comp.nodes.len(), 1770);
+    assert_eq!(comp.triangles.len(), 3234);
+    let det = landsurvey::surface::composite_cut_fill_detailed(&road, &comp);
+    // Civil 3D 2026 authoritative (Unadjusted):
+    assert!((det.cut_fill.cut  - 590_737.452_161_958).abs() < 1.0, "cut {} != C3D Fill golden", det.cut_fill.cut);
+    assert!((det.cut_fill.fill - 533_704.643_470_332).abs() < 1.0, "fill {} != C3D Cut golden", det.cut_fill.fill);
+    assert!((det.cut_fill.net  -  57_032.808_691_626).abs() < 1.0, "net {} != C3D golden", det.cut_fill.net);
 }
