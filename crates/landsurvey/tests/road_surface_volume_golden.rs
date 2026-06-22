@@ -61,3 +61,32 @@ fn datum_volume_crossing_matches_civil3d() {
     assert!((cf.net - 293_787.381_343_54).abs() < 0.1, "net {} != C3D golden", cf.net);
     assert!(!contour.is_empty(), "datum 1190 should cross the surface");
 }
+
+#[test]
+fn surface_to_surface_overlay_matches_civil3d_and_datum() {
+    // Exercises the surface->surface TIN-overlay path
+    // (`composite_cut_fill_detailed`) — distinct code from the surface->datum
+    // path above — against the SAME Civil 3D golden, using a flat comparison
+    // surface at 1190 that fully covers the road footprint (so the overlap is
+    // the whole road and the answer must equal the datum result). Proves three
+    // things at once: the overlay matches Civil 3D, it matches our own datum
+    // method, and it handles a 3,234-triangle surface crossing a plane.
+    use landsurvey::surface::Surface;
+    let road = road_surface();
+    // Road extent E 2195425.68..2196160.54, N 328444.95..330532.40 — padded.
+    let (e0, e1) = (2_195_325.0, 2_196_260.0);
+    let (n0, n1) = (328_345.0, 330_632.0);
+    let flat = Surface {
+        nodes: vec![[e0, n0, 1190.0], [e1, n0, 1190.0], [e1, n1, 1190.0], [e0, n1, 1190.0]],
+        triangles: vec![[0, 1, 2], [0, 2, 3]],
+    };
+    // top = road, bottom = flat: cut = road above 1190, fill = road below.
+    let det = landsurvey::surface::composite_cut_fill_detailed(&road, &flat);
+    // vs Civil 3D 2026 (Road Surface vs flat-1190 TIN volume surface):
+    assert!((det.cut_fill.cut  - 1_561_780.779_066_229).abs() < 1.0, "s2s cut {}", det.cut_fill.cut);
+    assert!((det.cut_fill.fill - 1_267_993.397_722_688).abs() < 1.0, "s2s fill {}", det.cut_fill.fill);
+    // and internally consistent with the surface->datum path:
+    let (datum, _) = road.cut_fill_to_datum_detailed(1190.0);
+    assert!((det.cut_fill.cut - datum.cut).abs() < 1.0, "s2s vs datum cut: {} vs {}", det.cut_fill.cut, datum.cut);
+    assert!((det.cut_fill.fill - datum.fill).abs() < 1.0, "s2s vs datum fill: {} vs {}", det.cut_fill.fill, datum.fill);
+}
