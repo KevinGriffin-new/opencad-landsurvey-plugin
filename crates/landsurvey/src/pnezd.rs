@@ -24,6 +24,15 @@ pub struct PnezdPoint {
     pub description: String,
 }
 
+impl PnezdPoint {
+    /// The feature code — the first whitespace-delimited token of the
+    /// description (e.g. `"CB"` from `"CB 0.50 0.30"`). Empty when there is no
+    /// description. Used to group/style points by code on import.
+    pub fn code(&self) -> &str {
+        self.description.split_whitespace().next().unwrap_or("")
+    }
+}
+
 /// Outcome of parsing a point document.
 #[derive(Debug, Default, PartialEq)]
 pub struct ParseOutcome {
@@ -219,6 +228,13 @@ garbage line
         assert_eq!(out.points[1].description, "IRON PIN, NE corner");
         // Missing description is empty, not an error.
         assert_eq!(out.points[2].description, "");
+    }
+
+    #[test]
+    fn feature_code_is_first_description_token() {
+        let out = parse("1, 5000, 4000, 10, CB 0.50 0.30\n2, 5001, 4001, 11,\n");
+        assert_eq!(out.points[0].code(), "CB");
+        assert_eq!(out.points[1].code(), ""); // empty description -> empty code
     }
 
     #[test]
