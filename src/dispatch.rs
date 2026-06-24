@@ -49,6 +49,10 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
             import_pnezd(host, cmd);
             true
         }
+        "LS_AUTOLABEL" => {
+            auto_label_toggle(host, cmd);
+            true
+        }
         "LS_IMPORTPLAN" => {
             import_plan(host, cmd);
             true
@@ -104,43 +108,132 @@ fn first_arg(cmd: &str) -> &str {
         .unwrap_or("")
 }
 
-/// `LS_PNEZD <path>` — import a PNEZD CSV as `Point` entities tagged with
-/// `LANDSURVEY_POINT` XDATA (point number + description).
+/// `LS_PNEZD <path> [pnezd|penzd] [preview]` — import a point file as labeled
+/// `Point` entities, grouped onto a per-feature-code layer (`LS-PT-<CODE>`) and
+/// tagged with `LANDSURVEY_POINT` XDATA (number + description). `preview` parses
+/// and reports without drawing. Delimiter (comma/tab/space) is auto-detected.
 fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
-    let arg = first_arg(cmd);
-    if arg.is_empty() {
-        host.push_info("Usage: LS_PNEZD <path-to-pnezd.csv>");
+    let rest = first_arg(cmd);
+    if rest.is_empty() {
+        host.push_info(
+            "Usage: LS_PNEZD <path-to-points> [pnezd|penzd] [detail] [preview]  \
+             (labels show the point number; add 'detail' for elevation + \
+             description; delimiter auto-detected)",
+        );
         return;
     }
-    let text = match fs::read_to_string(arg) {
+
+    // Peel optional trailing keywords (column order + preview) off the tail in
+    // any order; the remainder is the path (which may contain spaces).
+    let mut path = rest;
+    let mut fmt = pnezd::Format::pnezd();
+    let mut preview = false;
+    let mut detail = false;
+    loop {
+        let trimmed = path.trim_end();
+        let Some(idx) = trimmed.rfind(char::is_whitespace) else {
+            break;
+        };
+        match trimmed[idx + 1..].to_ascii_lowercase().as_str() {
+            "penzd" => {
+                fmt = pnezd::Format::penzd();
+                path = &trimmed[..idx];
+            }
+            "pnezd" => {
+                fmt = pnezd::Format::pnezd();
+                path = &trimmed[..idx];
+            }
+            "preview" => {
+                preview = true;
+                path = &trimmed[..idx];
+            }
+            "detail" => {
+                detail = true;
+                path = &trimmed[..idx];
+            }
+            _ => break,
+        }
+    }
+    let path = path.trim();
+
+    let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            host.push_error(&format!("LS_PNEZD: cannot read \"{arg}\": {e}"));
+            host.push_error(&format!("LS_PNEZD: cannot read \"{path}\": {e}"));
             return;
         }
     };
 
-    let outcome = pnezd::parse(&text);
+    let outcome = pnezd::parse_with(&text, &fmt);
     if outcome.points.is_empty() {
         host.push_error(&format!(
-            "LS_PNEZD: no valid points in \"{arg}\" ({} line(s) skipped).",
+            "LS_PNEZD: no valid points in \"{path}\" ({} line(s) skipped).",
             outcome.skipped
         ));
         return;
     }
 
+    // Preview: report what WOULD import — no changes to the drawing.
+    if preview {
+        let order = if fmt.easting < fmt.northing { "PENZD" } else { "PNEZD" };
+        host.push_output(&format!(
+            "LS_PNEZD preview \"{path}\" — order {order}: {} point(s), {} skipped. First rows:",
+            outcome.points.len(),
+            outcome.skipped
+        ));
+        for p in outcome.points.iter().take(5) {
+            host.push_output(&format!(
+                "  {:<8} E {:.3}  N {:.3}  Z {:.3}  {}",
+                p.number, p.easting, p.northing, p.elevation, p.description
+            ));
+        }
+        if outcome.points.len() > 5 {
+            host.push_output(&format!("  … and {} more", outcome.points.len() - 5));
+        }
+        return;
+    }
+
+    // Label/marker sizing follows MicroSurvey MSannotate proportions: a SMALL
+    // precise marker with the point number hugging it (~half a text-height
+    // away). The number — not the marker — is the prominent element. Text
+    // height scales to the survey extent so it stays legible at zoom-extents.
+    let h = label_height(&outcome.points);
+    let marker = {
+        let header = &mut host.document_mut().header;
+        if header.point_display_mode == 0 {
+            header.point_display_mode = 3; // '×' glyph
+        }
+        if header.point_display_size == 0.0 {
+            // A modest tick (~0.4×H), not a giant ×; the label carries the eye.
+            header.point_display_size = h * 0.4;
+        }
+        header.point_display_size
+    };
+    // Hug the marker: clear its arm (~half the display size) plus a small gap,
+    // matching MSannotate's ~0.47×H point-number offset for a small marker.
+    let off = marker * 0.5 + h * 0.3;
+    let auto_label =
+        !ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default).suppress_labels;
+
     host.push_undo("LS_PNEZD import");
     let mut added = 0usize;
     for p in &outcome.points {
+        let layer = code_layer(p.code());
         // World mapping: X = Easting, Y = Northing, Z = Elevation.
-        let entity = EntityType::Point(CadPoint::at(Vector3::new(p.easting, p.northing, p.elevation)));
-        let handle = host.add_entity(entity);
+        let mut pt =
+            EntityType::Point(CadPoint::at(Vector3::new(p.easting, p.northing, p.elevation)));
+        pt.common_mut().layer = layer.clone();
+        let handle = host.add_entity(pt);
 
         // write_record registers the APPID so the tag round-trips through DWG/DXF.
         let mut rec = ExtendedDataRecord::new(XDATA_POINT);
         rec.add_value(XDataValue::String(p.number.clone()));
         rec.add_value(XDataValue::String(p.description.clone()));
         host.write_record(handle, rec);
+
+        if auto_label {
+            draw_point_label(host, p, h, off, &layer, detail);
+        }
         added += 1;
     }
 
@@ -150,19 +243,6 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
         st.imported
     };
 
-    // Survey points must be visible. PDMODE defaults to 0 (a 1px dot); promote
-    // the document to a visible point style on first import, without clobbering
-    // a style the user already chose (e.g. via the host's DDPTYPE).
-    {
-        let header = &mut host.document_mut().header;
-        if header.point_display_mode == 0 {
-            header.point_display_mode = 3; // '×' glyph
-        }
-        if header.point_display_size == 0.0 {
-            header.point_display_size = 15.0; // world units
-        }
-    }
-
     host.bump_geometry();
     host.set_dirty();
     let skipped = if outcome.skipped > 0 {
@@ -171,8 +251,109 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
         String::new()
     };
     host.push_output(&format!(
-        "LS_PNEZD: imported {added} point(s){skipped}. {total} this session."
+        "LS_PNEZD: imported {added} labeled point(s){skipped}, grouped by code. \
+         {total} this session."
     ));
+}
+
+/// `LS_AUTOLABEL [ON|OFF]` — toggle whether `LS_PNEZD` draws point-number
+/// labels on import. With no argument, reports the current state.
+fn auto_label_toggle(host: &mut dyn HostApi, cmd: &str) {
+    let arg = first_arg(cmd).trim().to_ascii_uppercase();
+    if !matches!(arg.as_str(), "" | "ON" | "OFF") {
+        host.push_info("Usage: LS_AUTOLABEL [ON|OFF]");
+        return;
+    }
+    let on = {
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        match arg.as_str() {
+            "OFF" => st.suppress_labels = true,
+            "ON" => st.suppress_labels = false,
+            _ => {}
+        }
+        !st.suppress_labels
+    };
+    host.push_output(&format!(
+        "LS_AUTOLABEL: point labels {} on import.",
+        if on { "ON" } else { "OFF" }
+    ));
+}
+
+/// Per-feature-code layer name: `LS-PT-<CODE>` (code upper-cased, DWG-illegal
+/// characters replaced with `_`), or `LS-POINTS` when the point has no code.
+fn code_layer(code: &str) -> String {
+    if code.is_empty() {
+        return "LS-POINTS".to_string();
+    }
+    let safe: String = code
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("LS-PT-{safe}")
+}
+
+/// Point-number text height scaled to the point set's 2-D extent, so labels
+/// stay legible at zoom-extents whether the survey spans metres or kilometres
+/// (MicroSurvey sizes labels to the drawing rather than to a fixed value).
+fn label_height(points: &[pnezd::PnezdPoint]) -> f64 {
+    let (mut minx, mut maxx, mut miny, mut maxy) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in points {
+        minx = minx.min(p.easting);
+        maxx = maxx.max(p.easting);
+        miny = miny.min(p.northing);
+        maxy = maxy.max(p.northing);
+    }
+    ((maxx - minx).max(maxy - miny) / 40.0).max(1.0)
+}
+
+/// Draw a point's label up-right of the mark: the point number always, plus an
+/// elevation + description detail line below it when `show_detail` is set. Both
+/// go on `layer`.
+fn draw_point_label(
+    host: &mut dyn HostApi,
+    p: &pnezd::PnezdPoint,
+    h: f64,
+    off: f64,
+    layer: &str,
+    show_detail: bool,
+) {
+    let x = p.easting + off;
+    let y = p.northing + off;
+    add_on_layer(
+        host,
+        EntityType::Text(Text::with_value(p.number.clone(), Vector3::new(x, y, 0.0)).with_height(h)),
+        layer,
+    );
+
+    if !show_detail {
+        return;
+    }
+
+    let mut detail = String::new();
+    if p.elevation != 0.0 {
+        detail.push_str(&format!("{:.2}", p.elevation));
+    }
+    if !p.description.is_empty() {
+        if !detail.is_empty() {
+            detail.push(' ');
+        }
+        detail.push_str(&p.description);
+    }
+    if !detail.is_empty() {
+        add_on_layer(
+            host,
+            EntityType::Text(
+                Text::with_value(detail, Vector3::new(x, y - h * 1.3, 0.0)).with_height(h * 0.75),
+            ),
+            layer,
+        );
+    }
 }
 
 /// `LS_INVERSE <N1> <E1> <N2> <E2>` — distance + bearing between two coords.
@@ -183,7 +364,7 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
         .filter_map(|t| t.parse::<f64>().ok())
         .collect();
     if nums.len() < 4 {
-        host.push_info("Usage: LS_INVERSE <N1> <E1> <N2> <E2>");
+        host.push_info("Usage: LS_INVERSE <N1> <E1> <N2> <E2> [draw] [anim]");
         return;
     }
     let inv = cogo::inverse(nums[0], nums[1], nums[2], nums[3]);
@@ -193,11 +374,84 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
         inv.azimuth_deg,
         cogo::azimuth_to_bearing(inv.azimuth_deg)
     ));
+    // `LS_INVERSE <N1> <E1> <N2> <E2> draw` → draw the line with bearing +
+    // distance labels positioned by the MSannotate convention.
+    if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("draw")) {
+        // world mapping X = Easting, Y = Northing.
+        draw_inverse_line(host, nums[1], nums[0], nums[3], nums[2], &inv);
+    }
     // `LS_INVERSE <N1> <E1> <N2> <E2> anim` → export an animated-SVG explainer.
     if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("anim")) {
         let svg = viz::inverse_anim_svg(nums[0], nums[1], nums[2], nums[3]);
         write_anim_file(host, "inverse", &svg);
     }
+}
+
+/// Draw a line with bearing + distance labels using the MicroSurvey MSannotate
+/// convention (see vault note "Survey label positioning"): both labels at the
+/// segment **midpoint**, offset perpendicular to opposite sides (bearing +perp,
+/// distance −perp) by ~1 text-height, each rotated to the line and flipped 180°
+/// when the line would otherwise read upside-down. For a standalone inverse
+/// there is no parcel, so sides are simply left/right (the bearing-outside /
+/// distance-inside refinement needs a parcel centroid).
+fn draw_inverse_line(host: &mut dyn HostApi, e1: f64, n1: f64, e2: f64, n2: f64, inv: &cogo::Inverse) {
+    const LAYER: &str = "LS-INVERSE";
+
+    host.push_undo("LS_INVERSE draw");
+    add_on_layer(
+        host,
+        EntityType::Line(Line::from_points(
+            Vector3::new(e1, n1, 0.0),
+            Vector3::new(e2, n2, 0.0),
+        )),
+        LAYER,
+    );
+
+    let (dx, dy) = (e2 - e1, n2 - n1);
+    let (mx, my) = ((e1 + e2) / 2.0, (n1 + n2) / 2.0);
+    let line_ang = dy.atan2(dx);
+
+    // Rotation aligned to the line, flipped if it would read upside-down.
+    let mut deg = line_ang.to_degrees().rem_euclid(360.0);
+    if deg > 90.0 && deg <= 270.0 {
+        deg = (deg + 180.0).rem_euclid(360.0);
+    }
+    let rot = deg.to_radians();
+
+    let h = (inv.distance / 20.0).max(1.0); // text height ~ 5% of the line
+    let gap = 0.4 * h; // clearance between each label body and the line
+
+    // Work in the TEXT's own frame so spacing is symmetric regardless of the
+    // readable-flip. Text is baseline-anchored; glyphs rise from the baseline
+    // toward `up` and read along `read`. Put each label's CENTRE at ±(gap+h/2)
+    // along `up` (so its body clears the line by `gap` on its side), then step
+    // back to the baseline (−h/2 along `up`) and centre it along the line
+    // (−half-width along `read`).
+    let read = (rot.cos(), rot.sin());
+    let up = (-rot.sin(), rot.cos());
+    let d = gap + 0.5 * h;
+
+    let labels = [
+        (cogo::azimuth_to_bearing(inv.azimuth_deg), 1.0_f64), // bearing, +up side
+        (format!("{:.3}", inv.distance), -1.0),               // distance, −up side
+    ];
+    for (text, sign) in labels {
+        let half_w = 0.5 * text.chars().count() as f64 * h * 0.6;
+        let bx = mx + (sign * d - 0.5 * h) * up.0 - half_w * read.0;
+        let by = my + (sign * d - 0.5 * h) * up.1 - half_w * read.1;
+        add_on_layer(
+            host,
+            EntityType::Text(
+                Text::with_value(text, Vector3::new(bx, by, 0.0))
+                    .with_height(h)
+                    .with_rotation(rot),
+            ),
+            LAYER,
+        );
+    }
+
+    host.bump_geometry();
+    host.set_dirty();
 }
 
 /// Write an animated-SVG explainer to a temp folder and report the path so the
@@ -1006,14 +1260,39 @@ fn add_on_layer(host: &mut dyn HostApi, mut ent: EntityType, layer: &str) {
     host.add_entity(ent);
 }
 
-/// `LS_LIST` — count entities carrying the `LANDSURVEY_POINT` XDATA record.
+/// `LS_LIST` — list each Land Survey point (number, E/N/Z, description) read
+/// back from the `LANDSURVEY_POINT` XDATA record and the point geometry.
 fn list_points(host: &mut dyn HostApi) {
-    let count = host
-        .document()
-        .entities()
-        .filter(|e| e.common().extended_data.get_record(XDATA_POINT).is_some())
-        .count();
-    host.push_output(&format!("LS_LIST: {count} Land Survey point(s) in drawing."));
+    // Collect first (immutable borrow of the document), then emit (needs &mut).
+    let mut rows: Vec<String> = Vec::new();
+    for e in host.document().entities() {
+        let Some(rec) = e.common().extended_data.get_record(XDATA_POINT) else {
+            continue;
+        };
+        // The record holds [number, description] as strings (see import_pnezd).
+        let mut strs = rec.values.iter().filter_map(|v| match v {
+            XDataValue::String(s) => Some(s.as_str()),
+            _ => None,
+        });
+        let number = strs.next().unwrap_or("");
+        let description = strs.next().unwrap_or("");
+        let (east, north, elev) = match e {
+            EntityType::Point(p) => (p.location.x, p.location.y, p.location.z),
+            _ => (0.0, 0.0, 0.0),
+        };
+        rows.push(format!(
+            "  {number:<8} E {east:.3}  N {north:.3}  Z {elev:.3}  {description}"
+        ));
+    }
+
+    if rows.is_empty() {
+        host.push_output("LS_LIST: no Land Survey points in drawing.");
+        return;
+    }
+    host.push_output(&format!("LS_LIST: {} Land Survey point(s):", rows.len()));
+    for r in &rows {
+        host.push_output(r);
+    }
 }
 
 /// `LS_IMPORTPLAN <path.json>` — import recognized plan geometry (the

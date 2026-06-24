@@ -17,6 +17,9 @@ pub struct LandSurveyState {
     pub imported: usize,
     /// Surfaces built/imported this session, newest last.
     pub surfaces: Vec<StoredSurface>,
+    /// When true, `LS_PNEZD` imports points WITHOUT drawing number labels
+    /// (toggled by `LS_AUTOLABEL OFF`). Default false = auto-labels on.
+    pub suppress_labels: bool,
 }
 
 impl LandSurveyState {
