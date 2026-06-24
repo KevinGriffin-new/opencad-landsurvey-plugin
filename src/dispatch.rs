@@ -107,23 +107,39 @@ fn first_arg(cmd: &str) -> &str {
 /// `LS_PNEZD <path>` — import a PNEZD CSV as `Point` entities tagged with
 /// `LANDSURVEY_POINT` XDATA (point number + description).
 fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
-    let arg = first_arg(cmd);
-    if arg.is_empty() {
-        host.push_info("Usage: LS_PNEZD <path-to-pnezd.csv>");
+    let rest = first_arg(cmd);
+    if rest.is_empty() {
+        host.push_info(
+            "Usage: LS_PNEZD <path-to-points> [pnezd|penzd]  \
+             (default pnezd; comma/tab/space delimiter auto-detected)",
+        );
         return;
     }
-    let text = match fs::read_to_string(arg) {
+    // An optional trailing `pnezd`/`penzd` keyword selects the column order; the
+    // remainder is the path (which may contain spaces). The delimiter is always
+    // auto-detected (comma / tab / runs of whitespace).
+    let (path, fmt) = match rest.rsplit_once(char::is_whitespace) {
+        Some((head, tail)) if tail.eq_ignore_ascii_case("penzd") => {
+            (head.trim(), pnezd::Format::penzd())
+        }
+        Some((head, tail)) if tail.eq_ignore_ascii_case("pnezd") => {
+            (head.trim(), pnezd::Format::pnezd())
+        }
+        _ => (rest, pnezd::Format::pnezd()),
+    };
+
+    let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            host.push_error(&format!("LS_PNEZD: cannot read \"{arg}\": {e}"));
+            host.push_error(&format!("LS_PNEZD: cannot read \"{path}\": {e}"));
             return;
         }
     };
 
-    let outcome = pnezd::parse(&text);
+    let outcome = pnezd::parse_with(&text, &fmt);
     if outcome.points.is_empty() {
         host.push_error(&format!(
-            "LS_PNEZD: no valid points in \"{arg}\" ({} line(s) skipped).",
+            "LS_PNEZD: no valid points in \"{path}\" ({} line(s) skipped).",
             outcome.skipped
         ));
         return;
