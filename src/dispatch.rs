@@ -49,6 +49,10 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
             import_pnezd(host, cmd);
             true
         }
+        "LS_AUTOLABEL" => {
+            auto_label_toggle(host, cmd);
+            true
+        }
         "LS_IMPORTPLAN" => {
             import_plan(host, cmd);
             true
@@ -208,6 +212,8 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
     // Hug the marker: clear its arm (~half the display size) plus a small gap,
     // matching MSannotate's ~0.47×H point-number offset for a small marker.
     let off = marker * 0.5 + h * 0.3;
+    let auto_label =
+        !ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default).suppress_labels;
 
     host.push_undo("LS_PNEZD import");
     let mut added = 0usize;
@@ -225,7 +231,9 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
         rec.add_value(XDataValue::String(p.description.clone()));
         host.write_record(handle, rec);
 
-        draw_point_label(host, p, h, off, &layer, detail);
+        if auto_label {
+            draw_point_label(host, p, h, off, &layer, detail);
+        }
         added += 1;
     }
 
@@ -245,6 +253,29 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
     host.push_output(&format!(
         "LS_PNEZD: imported {added} labeled point(s){skipped}, grouped by code. \
          {total} this session."
+    ));
+}
+
+/// `LS_AUTOLABEL [ON|OFF]` — toggle whether `LS_PNEZD` draws point-number
+/// labels on import. With no argument, reports the current state.
+fn auto_label_toggle(host: &mut dyn HostApi, cmd: &str) {
+    let arg = first_arg(cmd).trim().to_ascii_uppercase();
+    if !matches!(arg.as_str(), "" | "ON" | "OFF") {
+        host.push_info("Usage: LS_AUTOLABEL [ON|OFF]");
+        return;
+    }
+    let on = {
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        match arg.as_str() {
+            "OFF" => st.suppress_labels = true,
+            "ON" => st.suppress_labels = false,
+            _ => {}
+        }
+        !st.suppress_labels
+    };
+    host.push_output(&format!(
+        "LS_AUTOLABEL: point labels {} on import.",
+        if on { "ON" } else { "OFF" }
     ));
 }
 
@@ -333,7 +364,7 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
         .filter_map(|t| t.parse::<f64>().ok())
         .collect();
     if nums.len() < 4 {
-        host.push_info("Usage: LS_INVERSE <N1> <E1> <N2> <E2>");
+        host.push_info("Usage: LS_INVERSE <N1> <E1> <N2> <E2> [draw] [anim]");
         return;
     }
     let inv = cogo::inverse(nums[0], nums[1], nums[2], nums[3]);
@@ -343,11 +374,84 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
         inv.azimuth_deg,
         cogo::azimuth_to_bearing(inv.azimuth_deg)
     ));
+    // `LS_INVERSE <N1> <E1> <N2> <E2> draw` → draw the line with bearing +
+    // distance labels positioned by the MSannotate convention.
+    if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("draw")) {
+        // world mapping X = Easting, Y = Northing.
+        draw_inverse_line(host, nums[1], nums[0], nums[3], nums[2], &inv);
+    }
     // `LS_INVERSE <N1> <E1> <N2> <E2> anim` → export an animated-SVG explainer.
     if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("anim")) {
         let svg = viz::inverse_anim_svg(nums[0], nums[1], nums[2], nums[3]);
         write_anim_file(host, "inverse", &svg);
     }
+}
+
+/// Draw a line with bearing + distance labels using the MicroSurvey MSannotate
+/// convention (see vault note "Survey label positioning"): both labels at the
+/// segment **midpoint**, offset perpendicular to opposite sides (bearing +perp,
+/// distance −perp) by ~1 text-height, each rotated to the line and flipped 180°
+/// when the line would otherwise read upside-down. For a standalone inverse
+/// there is no parcel, so sides are simply left/right (the bearing-outside /
+/// distance-inside refinement needs a parcel centroid).
+fn draw_inverse_line(host: &mut dyn HostApi, e1: f64, n1: f64, e2: f64, n2: f64, inv: &cogo::Inverse) {
+    const LAYER: &str = "LS-INVERSE";
+
+    host.push_undo("LS_INVERSE draw");
+    add_on_layer(
+        host,
+        EntityType::Line(Line::from_points(
+            Vector3::new(e1, n1, 0.0),
+            Vector3::new(e2, n2, 0.0),
+        )),
+        LAYER,
+    );
+
+    let (dx, dy) = (e2 - e1, n2 - n1);
+    let (mx, my) = ((e1 + e2) / 2.0, (n1 + n2) / 2.0);
+    let line_ang = dy.atan2(dx);
+
+    // Rotation aligned to the line, flipped if it would read upside-down.
+    let mut deg = line_ang.to_degrees().rem_euclid(360.0);
+    if deg > 90.0 && deg <= 270.0 {
+        deg = (deg + 180.0).rem_euclid(360.0);
+    }
+    let rot = deg.to_radians();
+
+    let h = (inv.distance / 20.0).max(1.0); // text height ~ 5% of the line
+    let gap = 0.4 * h; // clearance between each label body and the line
+
+    // Work in the TEXT's own frame so spacing is symmetric regardless of the
+    // readable-flip. Text is baseline-anchored; glyphs rise from the baseline
+    // toward `up` and read along `read`. Put each label's CENTRE at ±(gap+h/2)
+    // along `up` (so its body clears the line by `gap` on its side), then step
+    // back to the baseline (−h/2 along `up`) and centre it along the line
+    // (−half-width along `read`).
+    let read = (rot.cos(), rot.sin());
+    let up = (-rot.sin(), rot.cos());
+    let d = gap + 0.5 * h;
+
+    let labels = [
+        (cogo::azimuth_to_bearing(inv.azimuth_deg), 1.0_f64), // bearing, +up side
+        (format!("{:.3}", inv.distance), -1.0),               // distance, −up side
+    ];
+    for (text, sign) in labels {
+        let half_w = 0.5 * text.chars().count() as f64 * h * 0.6;
+        let bx = mx + (sign * d - 0.5 * h) * up.0 - half_w * read.0;
+        let by = my + (sign * d - 0.5 * h) * up.1 - half_w * read.1;
+        add_on_layer(
+            host,
+            EntityType::Text(
+                Text::with_value(text, Vector3::new(bx, by, 0.0))
+                    .with_height(h)
+                    .with_rotation(rot),
+            ),
+            LAYER,
+        );
+    }
+
+    host.bump_geometry();
+    host.set_dirty();
 }
 
 /// Write an animated-SVG explainer to a temp folder and report the path so the
