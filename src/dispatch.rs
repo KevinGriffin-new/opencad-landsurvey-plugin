@@ -373,13 +373,32 @@ fn draw_point_label(
 
 /// `LS_INVERSE <N1> <E1> <N2> <E2>` — distance + bearing between two coords.
 fn inverse(host: &mut dyn HostApi, cmd: &str) {
-    let nums: Vec<f64> = cmd
-        .split_whitespace()
-        .skip(1)
-        .filter_map(|t| t.parse::<f64>().ok())
-        .collect();
-    if nums.len() < 4 {
-        host.push_info("Usage: LS_INVERSE <N1> <E1> <N2> <E2> [draw] [anim]");
+    const USAGE: &str = "Usage: LS_INVERSE <N1> <E1> <N2> <E2> [draw] [anim]";
+    let toks: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if toks.is_empty() {
+        host.push_info(USAGE);
+        return;
+    }
+    // Strict: exactly 4 finite coordinates plus known keywords — a lenient
+    // parse would let a typo shift the coordinates one slot left.
+    let mut nums: Vec<f64> = Vec::with_capacity(4);
+    for t in &toks {
+        if t.eq_ignore_ascii_case("draw") || t.eq_ignore_ascii_case("anim") {
+            continue;
+        }
+        match t.parse::<f64>() {
+            Ok(v) if v.is_finite() => nums.push(v),
+            _ => {
+                host.push_error(&format!("LS_INVERSE: \"{t}\" is not a finite number. {USAGE}"));
+                return;
+            }
+        }
+    }
+    if nums.len() != 4 {
+        host.push_error(&format!(
+            "LS_INVERSE: expected 4 coordinates, got {}. {USAGE}",
+            nums.len()
+        ));
         return;
     }
     let inv = cogo::inverse(nums[0], nums[1], nums[2], nums[3]);
@@ -976,19 +995,46 @@ fn tag_surface(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, name: &
 /// in place. Implemented as translate(-base) -> scale -> rotate -> translate(+to),
 /// which reproduces the engine's `Conformal::from_base_swing`.
 fn rts(host: &mut dyn HostApi, cmd: &str) {
-    let nums: Vec<f64> = cmd
-        .split_whitespace()
-        .skip(1)
-        .filter_map(|t| t.parse::<f64>().ok())
-        .collect();
-    if nums.len() < 4 {
-        host.push_info("Usage: LS_RTS <baseN> <baseE> <rot_deg> <scale> [<toN> <toE>]");
+    const USAGE: &str = "Usage: LS_RTS <baseN> <baseE> <rot_deg> <scale> [<toN> <toE>]";
+    let toks: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if toks.is_empty() {
+        host.push_info(USAGE);
         return;
     }
+    // Strict: this command transforms EVERY entity in the drawing, so a typo
+    // must be an error — the old lenient parse dropped the bad token and
+    // silently shifted the remaining arguments one slot left.
+    if toks.len() != 4 && toks.len() != 6 {
+        host.push_error(&format!(
+            "LS_RTS: expected 4 or 6 arguments, got {}. {USAGE}",
+            toks.len()
+        ));
+        return;
+    }
+    let mut nums = Vec::with_capacity(toks.len());
+    for t in &toks {
+        match t.parse::<f64>() {
+            Ok(v) if v.is_finite() => nums.push(v),
+            _ => {
+                host.push_error(&format!("LS_RTS: \"{t}\" is not a finite number. {USAGE}"));
+                return;
+            }
+        }
+    }
     let (bn, be, rot_deg, scale) = (nums[0], nums[1], nums[2], nums[3]);
-    let (tn, te) = if nums.len() >= 6 { (nums[4], nums[5]) } else { (bn, be) };
+    if scale <= 0.0 {
+        host.push_error(&format!("LS_RTS: scale must be positive, got {scale}."));
+        return;
+    }
+    let (tn, te) = if nums.len() == 6 { (nums[4], nums[5]) } else { (bn, be) };
     let rot = rot_deg.to_radians();
 
+    // Check before push_undo: an empty drawing must not leave a stray undo
+    // entry that makes the user's next Ctrl-Z appear to do nothing.
+    if host.document().entities().next().is_none() {
+        host.push_info("LS_RTS: no entities in the drawing to transform.");
+        return;
+    }
     host.push_undo("LS_RTS");
     let mut count = 0usize;
     for ent in host.document_mut().entities_mut() {
@@ -999,10 +1045,6 @@ fn rts(host: &mut dyn HostApi, cmd: &str) {
         e.apply_rotation(Vector3::new(0.0, 0.0, 1.0), rot);
         e.translate(Vector3::new(te, tn, 0.0));
         count += 1;
-    }
-    if count == 0 {
-        host.push_info("LS_RTS: no entities in the drawing to transform.");
-        return;
     }
     host.bump_geometry();
     host.set_dirty();
@@ -1052,7 +1094,13 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
             return;
         }
     };
-    let pairs = transform::parse_control_pairs(&text);
+    let pairs = match transform::parse_control_pairs(&text) {
+        Ok(p) => p,
+        Err(e) => {
+            host.push_error(&format!("LS_HELMERT: \"{path}\": {e}"));
+            return;
+        }
+    };
     if pairs.len() < 2 {
         host.push_error(&format!(
             "LS_HELMERT: \"{path}\" has {} control pair(s); need at least 2.",

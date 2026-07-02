@@ -127,6 +127,15 @@ pub fn helmert_fit_explained(
     if n < 2 {
         return Err("helmert_fit needs at least 2 control pairs");
     }
+    // f64::parse accepts "NaN"/"inf"; a non-finite pair sails through the
+    // degenerate-geometry guard below (NaN comparisons are false) and yields a
+    // transform of NaNs that downstream code would render or apply.
+    if pairs
+        .iter()
+        .any(|&((a, b), (c, d))| ![a, b, c, d].iter().all(|v| v.is_finite()))
+    {
+        return Err("control pairs contain non-finite coordinates");
+    }
     let nf = n as f64;
     let (mut cx, mut cy, mut cx2, mut cy2) = (0.0, 0.0, 0.0, 0.0);
     for &((es, ns), (ed, nd)) in pairs {
@@ -189,26 +198,72 @@ pub fn fit_residuals(t: &Conformal, pairs: &[((f64, f64), (f64, f64))]) -> (Vec<
 }
 
 /// Parse control-point pairs for a Helmert fit. Each non-blank, non-`#` line is
-/// `srcN, srcE, dstN, dstE` (comma / whitespace separated; any extra fields are
-/// ignored). Returns pairs as `((srcE, srcN), (dstE, dstN))` — the `(E, N)`
-/// order [`helmert_fit`] expects.
-pub fn parse_control_pairs(text: &str) -> Vec<((f64, f64), (f64, f64))> {
+/// `srcN, srcE, dstN, dstE` (comma / whitespace separated), with an optional
+/// point ID as the first or last field, recognized only when it is
+/// non-numeric (`CP1`); an all-numeric 5-field line is rejected as ambiguous
+/// rather than guessed at. Returns pairs as
+/// `((srcE, srcN), (dstE, dstN))` — the `(E, N)` order [`helmert_fit`] expects.
+///
+/// Malformed lines are an error, not a skip: a stray token or an extra column
+/// would otherwise shift the remaining coordinates one slot left and produce a
+/// garbage fit that still reports a plausible RMS.
+pub fn parse_control_pairs(text: &str) -> Result<Vec<((f64, f64), (f64, f64))>, String> {
     let mut out = Vec::new();
-    for line in text.lines() {
+    for (idx, line) in text.lines().enumerate() {
         let l = line.trim();
         if l.is_empty() || l.starts_with('#') {
             continue;
         }
-        let nums: Vec<f64> = l
-            .split(|c| c == ',' || c == ' ' || c == '\t')
+        let mut toks: Vec<&str> = l
+            .split([',', ' ', '\t'])
+            .map(str::trim)
             .filter(|s| !s.is_empty())
-            .filter_map(|s| s.trim().parse::<f64>().ok())
             .collect();
-        if nums.len() >= 4 {
-            out.push(((nums[1], nums[0]), (nums[3], nums[2])));
+        let numeric = |t: &str| t.parse::<f64>().is_ok();
+        // 5 fields = a point ID at one end. A non-numeric end identifies
+        // itself; all-numeric is ambiguous (leading point *number* vs trailing
+        // ID) and silently guessing wrong would shift every coordinate.
+        if toks.len() == 5 {
+            match (numeric(toks[0]), numeric(toks[4])) {
+                (false, true) => {
+                    toks.remove(0);
+                }
+                (true, false) => {
+                    toks.pop();
+                }
+                _ => {
+                    return Err(format!(
+                        "control line {}: 5 numeric fields is ambiguous (point \
+                         ID first or last?) — use 4 fields `srcN srcE dstN dstE` \
+                         or a non-numeric ID: \"{l}\"",
+                        idx + 1
+                    ));
+                }
+            }
         }
+        if toks.len() != 4 {
+            return Err(format!(
+                "control line {}: expected `srcN srcE dstN dstE` (with an \
+                 optional ID first or last), got {} field(s): \"{l}\"",
+                idx + 1,
+                toks.len()
+            ));
+        }
+        let mut nums = [0.0f64; 4];
+        for (n, t) in nums.iter_mut().zip(&toks) {
+            *n = match t.parse::<f64>() {
+                Ok(v) if v.is_finite() => v,
+                _ => {
+                    return Err(format!(
+                        "control line {}: \"{t}\" is not a finite number: \"{l}\"",
+                        idx + 1
+                    ))
+                }
+            };
+        }
+        out.push(((nums[1], nums[0]), (nums[3], nums[2])));
     }
-    out
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -239,17 +294,39 @@ mod tests {
     }
 
     #[test]
-    fn parse_pairs_skips_junk_and_orders_en() {
+    fn parse_pairs_accepts_ids_and_orders_en() {
         let text = "# srcN, srcE, dstN, dstE\n\
                     1000, 2000, 5000, 6000, CP1\n\
                     \n\
-                    bad line\n\
-                    1100 2100 5100 6100\n";
-        let pairs = parse_control_pairs(text);
-        assert_eq!(pairs.len(), 2);
+                    CP2, 1100, 2100, 5100, 6100\n\
+                    1200 2200 5200 6200\n";
+        let pairs = parse_control_pairs(text).expect("valid control file");
+        assert_eq!(pairs.len(), 3);
         // (srcE, srcN) then (dstE, dstN)
         assert_eq!(pairs[0], ((2000.0, 1000.0), (6000.0, 5000.0)));
         assert_eq!(pairs[1], ((2100.0, 1100.0), (6100.0, 5100.0)));
+        assert_eq!(pairs[2], ((2200.0, 1200.0), (6200.0, 5200.0)));
+    }
+
+    #[test]
+    fn parse_pairs_rejects_malformed_lines_loudly() {
+        // Junk text: previously silently skipped.
+        assert!(parse_control_pairs("bad line\n").is_err());
+        // All-numeric 5 fields: previously consumed the point number as srcN
+        // and silently discarded dstE — the column-shift trap.
+        assert!(parse_control_pairs("101, 1000, 2000, 5000, 6000\n").is_err());
+        // Too many / too few fields.
+        assert!(parse_control_pairs("1 2 3 4 5 6\n").is_err());
+        assert!(parse_control_pairs("1 2 3\n").is_err());
+        // Non-finite coordinates: f64::parse accepts these strings.
+        assert!(parse_control_pairs("NaN 2000 5000 6000\n").is_err());
+        assert!(parse_control_pairs("1000 inf 5000 6000\n").is_err());
+    }
+
+    #[test]
+    fn helmert_fit_rejects_non_finite_pairs() {
+        let pairs = [((0.0, 0.0), (10.0, 10.0)), ((f64::NAN, 5.0), (12.0, 15.0))];
+        assert!(helmert_fit(&pairs).is_err());
     }
 
     #[test]
@@ -296,7 +373,7 @@ mod tests {
     #[test]
     fn fit_reports_residuals_on_noisy_data() {
         // Exact except one perturbed target -> non-zero rms.
-        let truth = Conformal::from_base_swing((0.0, 0.0), (0.0, 0.0), 0.0, 1.0);
+        let _truth = Conformal::from_base_swing((0.0, 0.0), (0.0, 0.0), 0.0, 1.0);
         let mut pairs: Vec<_> =
             [(0.0, 0.0), (10.0, 0.0), (0.0, 10.0)].iter().map(|&p| (p, p)).collect();
         pairs.push(((10.0, 10.0), (10.1, 10.0))); // 0.1 ft off

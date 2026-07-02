@@ -281,7 +281,8 @@ fn cmd_helmert(args: &[String]) -> Result<String, String> {
     let (pos, opts) = split_args(args, &["-o", "--out", "--csv", "--apply", "--anim"]);
     let path = pos.first().ok_or("usage: helmert <pairs.csv> [--apply points.csv] [--anim out.svg] [-o out.dxf]")?;
     let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
-    let pairs = transform::parse_control_pairs(&text);
+    let pairs = transform::parse_control_pairs(&text)
+        .map_err(|e| format!("\"{path}\": {e}"))?;
     if pairs.len() < 2 {
         return Err(format!("\"{path}\" has {} control pair(s); need at least 2", pairs.len()));
     }
