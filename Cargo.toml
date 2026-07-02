@@ -11,23 +11,23 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
-# Pinned to the v0.6.6 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "8020286553c954d6f832d534e27c763418472da7", features = ["host"] }
+# Pinned to the v0.7.2 RELEASE TAG commit (the MSI host) so contract types match.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "8a69ef9de31605d3db7b0c4409c179f5e9a007e7", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
 # records, so it names `acadrust` types directly. Must resolve to the *same*
 # acadrust as the host (via the patch below) for the loaded library to be
 # binary-compatible (approach B: same toolchain + dependency versions).
-acadrust = "0.3.4"
+acadrust = "0.4"
 
 # Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
 landsurvey = { path = "crates/landsurvey" }
 
-# Match the v0.6.6 release's acadrust EXACTLY (from its Cargo.lock) so the
-# loaded library is binary-compatible with the MSI host. (Unchanged from
-# v0.6.5 — 0.6.6 kept the same acadrust rev.)
+# Match the v0.7.2 release's acadrust EXACTLY (from its Cargo.lock) so the
+# loaded library is binary-compatible with the MSI host. (acadrust MAJOR bump
+# 0.3.4 -> 0.4 landed between host 0.6.6 and 0.7.2.)
 [patch.crates-io]
-acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "7b6bbf4a620540e917d6254b1c87076f76909973" }
+acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "4ae2ceb72f00b69e983b20111c809aecf138814c" }
 
 [workspace]
 members = ["crates/landsurvey", "crates/landsurvey-cli"]
