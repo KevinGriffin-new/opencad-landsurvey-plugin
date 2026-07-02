@@ -38,7 +38,22 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
     // Route on the first whitespace-delimited token; keep the original `cmd`
     // for argument parsing (paths/coords are case- and content-sensitive).
     let verb = cmd.split_whitespace().next().unwrap_or("").to_uppercase();
-    match verb.as_str() {
+    if !(verb.starts_with("LS_") || verb == "LANDXMLIMPORT") {
+        return false;
+    }
+    // The host round-trips XDATA/layers only through the document's raw DWG
+    // fields (see xdata_persist): decode our tags before the command reads
+    // them, re-encode after it may have written some.
+    crate::xdata_persist::hydrate_host(host);
+    let handled = dispatch_verb(host, &verb, cmd);
+    if handled {
+        crate::xdata_persist::commit_host(host);
+    }
+    handled
+}
+
+fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
+    match verb {
         "LS_HELLO" => {
             host.push_info(
                 "Land Survey plugin ready. Commands: LS_PNEZD, LS_IMPORTPLAN, LS_INVERSE, LS_LIST.",
