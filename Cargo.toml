@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
 # Pinned to the v0.7.2 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "8a69ef9de31605d3db7b0c4409c179f5e9a007e7", features = ["host"] }
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "f9f713837028011419a94028ca333d112ba7b9f8", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
 # records, so it names `acadrust` types directly. Must resolve to the *same*
@@ -27,7 +27,7 @@ landsurvey = { path = "crates/landsurvey" }
 # loaded library is binary-compatible with the MSI host. (acadrust MAJOR bump
 # 0.3.4 -> 0.4 landed between host 0.6.6 and 0.7.2.)
 [patch.crates-io]
-acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "4ae2ceb72f00b69e983b20111c809aecf138814c" }
+acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "e88a9a6afdcf20db4c1f3140088b2f4b8b851e2b" }
 
 [workspace]
 members = ["crates/landsurvey", "crates/landsurvey-cli"]

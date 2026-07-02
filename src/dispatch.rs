@@ -41,15 +41,12 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
     if !(verb.starts_with("LS_") || verb == "LANDXMLIMPORT") {
         return false;
     }
-    // The host round-trips XDATA/layers only through the document's raw DWG
-    // fields (see xdata_persist): decode our tags before the command reads
-    // them, re-encode after it may have written some.
-    crate::xdata_persist::hydrate_host(host);
-    let handled = dispatch_verb(host, &verb, cmd);
-    if handled {
-        crate::xdata_persist::commit_host(host);
-    }
-    handled
+    // XDATA records round-trip natively since acadrust e88a9a6 / OCS #249
+    // (records encode to EED on save and decode back on read), so commands
+    // read and write tags through the host API with no extra codec pass.
+    // Layer-table registration for novel LS-* layers is still host-side work
+    // (OCS #252) — nothing the plugin can do out-of-process.
+    dispatch_verb(host, &verb, cmd)
 }
 
 fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
@@ -1036,15 +1033,21 @@ fn rts(host: &mut dyn HostApi, cmd: &str) {
         return;
     }
     host.push_undo("LS_RTS");
+    // Out-of-process, document_mut() is a local snapshot (OCS #250): transform
+    // a clone of each entity and push it back through update_entity, which is
+    // an RPC that mutates the real host document in place (handle preserved).
+    let snapshot: Vec<EntityType> = host.document().entities().cloned().collect();
     let mut count = 0usize;
-    for ent in host.document_mut().entities_mut() {
+    for mut ent in snapshot {
         let e = ent.as_entity_mut();
         // base -> origin, scale + rotate about origin, then origin -> destination.
         e.translate(Vector3::new(-be, -bn, 0.0));
         e.apply_scaling(scale);
         e.apply_rotation(Vector3::new(0.0, 0.0, 1.0), rot);
         e.translate(Vector3::new(te, tn, 0.0));
-        count += 1;
+        if host.update_entity(ent) {
+            count += 1;
+        }
     }
     host.bump_geometry();
     host.set_dirty();
@@ -1165,14 +1168,18 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
         let scale = t.scale();
         let rot = t.rotation_deg().to_radians();
         host.push_undo("LS_HELMERT apply");
+        // Same snapshot + update_entity pattern as LS_RTS (OCS #250).
+        let snapshot: Vec<EntityType> = host.document().entities().cloned().collect();
         let mut count = 0usize;
-        for ent in host.document_mut().entities_mut() {
+        for mut ent in snapshot {
             let e = ent.as_entity_mut();
             // E' = s*R*(E,N) + (c,d): scale & rotate about origin, then translate.
             e.apply_scaling(scale);
             e.apply_rotation(Vector3::new(0.0, 0.0, 1.0), rot);
             e.translate(Vector3::new(t.c, t.d, 0.0));
-            count += 1;
+            if host.update_entity(ent) {
+                count += 1;
+            }
         }
         host.bump_geometry();
         host.set_dirty();
@@ -1548,8 +1555,71 @@ fn place(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, source: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use acadrust::tables::{AppId, TableEntry};
     use acadrust::{CadDocument, DwgReader, DwgWriter};
     use std::io::Cursor;
+
+    /// Register the LANDSURVEY_* APPIDs with real handles, as the fixed host
+    /// `ensure_app_id` does on `write_record` (OCS #249). A standalone test
+    /// document has no host, so the writer needs this done by hand for the
+    /// EED app references to resolve.
+    fn register_ls_app_ids(doc: &mut CadDocument) {
+        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE] {
+            if !doc.app_ids.contains(name) {
+                let mut app = AppId::new(name);
+                app.set_handle(doc.allocate_handle());
+                let _ = doc.app_ids.add(app);
+            }
+        }
+    }
+
+    /// Stock acadrust (e88a9a6+, OCS #249): `ExtendedData::records` survive a
+    /// DWG write/read with NO plugin-side codec. Regression guard for the fix
+    /// that let us delete the old `xdata_persist` module.
+    ///
+    /// The companion layer assertion is intentionally inverted: novel layers
+    /// with no table entry still collapse to layer 0 on save (OCS #252, open).
+    /// When Hakan fixes #252 this test FAILS — that's the signal to flip the
+    /// assert and drop any remaining layer caveats from the docs.
+    #[test]
+    fn stock_records_roundtrip_and_252_layer_canary() {
+        let mut doc = CadDocument::default();
+        register_ls_app_ids(&mut doc);
+        let mut pt = EntityType::Point(CadPoint::at(Vector3::new(5000.0, 4000.0, 101.5)));
+        pt.common_mut().layer = "LS-PT-IP".to_string();
+        let mut rec = ExtendedDataRecord::new(XDATA_POINT);
+        rec.add_value(XDataValue::String("101".into()));
+        rec.add_value(XDataValue::String("IRON PIN".into()));
+        pt.common_mut().extended_data.add_record(rec);
+        let h = doc.add_entity(pt).expect("add point");
+
+        let bytes = DwgWriter::write_to_vec(&doc).expect("dwg write");
+        let rt = DwgReader::from_stream(Cursor::new(bytes))
+            .read()
+            .expect("dwg read");
+        let ent = rt.get_entity(h).expect("point entity");
+        let got: Vec<String> = ent
+            .common()
+            .extended_data
+            .get_record(XDATA_POINT)
+            .expect("LANDSURVEY_POINT record lost — OCS #249 regressed?")
+            .values
+            .iter()
+            .filter_map(|v| match v {
+                XDataValue::String(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, vec!["101".to_string(), "IRON PIN".to_string()]);
+
+        // #252 canary — flips when the host starts registering novel layers.
+        assert_ne!(
+            ent.common().layer,
+            "LS-PT-IP",
+            "layer SURVIVED: OCS #252 appears fixed — invert this assert and \
+             remove the layer-collapse caveats"
+        );
+    }
 
     /// A small non-cocircular TIN: unit square footprint with a lifted corner
     /// plus an interior point, so the Delaunay result is unambiguous.
@@ -1626,25 +1696,15 @@ mod tests {
 
     #[test]
     fn surface_survives_dwg_save_reopen() {
-        // The end-to-end story: tag → commit (raw EED) → DWG bytes → reopen →
-        // hydrate → rebuild by name.
+        // The end-to-end story on stock acadrust (e88a9a6+, OCS #249): tag →
+        // DWG bytes → reopen → rebuild by name. Records encode to EED on write
+        // and decode back on read with no plugin-side codec.
         let mut doc = doc_with_tagged_mesh("EG");
-        crate::xdata_persist::commit_document(&mut doc);
+        register_ls_app_ids(&mut doc);
         let bytes = DwgWriter::write_to_vec(&doc).expect("dwg write");
-        let mut rt = DwgReader::from_stream(Cursor::new(bytes))
+        let rt = DwgReader::from_stream(Cursor::new(bytes))
             .read()
             .expect("dwg read");
-        // Simulate a fresh open: raw blobs only, no parsed records.
-        for ent in rt.entities_mut() {
-            let raw = ent.common().extended_data.raw_dwg_eed.clone();
-            ent.common_mut().extended_data.clear();
-            ent.common_mut().extended_data.raw_dwg_eed = raw;
-        }
-        assert!(
-            find_surface_in_document(&rt, "EG").is_none(),
-            "sanity: tag unreadable before hydrate"
-        );
-        crate::xdata_persist::hydrate_document(&mut rt);
         let (name, surf) = find_surface_in_document(&rt, "EG")
             .expect("surface recoverable after DWG round-trip");
         assert_eq!(name, "EG");

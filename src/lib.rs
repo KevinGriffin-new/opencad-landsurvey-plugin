@@ -16,7 +16,6 @@ use ocs_plugin_api::ribbon::CadModule;
 mod dispatch;
 mod ribbon;
 mod state;
-mod xdata_persist;
 
 /// Reverse-DNS plugin id; the key for per-tab state and the plugins folder.
 pub const PLUGIN_ID: &str = "opencad.landsurvey";
