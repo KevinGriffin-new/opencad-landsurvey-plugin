@@ -439,8 +439,9 @@ fn convex_hull(pts: &[(f64, f64)]) -> Vec<usize> {
         return (0..n).collect();
     }
     let mut idx: Vec<usize> = (0..n).collect();
+    // total_cmp: NaN input must not panic the sort (NaN orders last instead).
     idx.sort_by(|&a, &b| {
-        pts[a].0.partial_cmp(&pts[b].0).unwrap().then(pts[a].1.partial_cmp(&pts[b].1).unwrap())
+        pts[a].0.total_cmp(&pts[b].0).then(pts[a].1.total_cmp(&pts[b].1))
     });
     let cross = |o: usize, a: usize, b: usize| {
         (pts[a].0 - pts[o].0) * (pts[b].1 - pts[o].1) - (pts[a].1 - pts[o].1) * (pts[b].0 - pts[o].0)
