@@ -581,6 +581,24 @@ fn mesh_from_surface(surf: &Surface) -> Mesh {
     Mesh::from_triangles(verts, &tris)
 }
 
+/// Inverse of [`mesh_from_surface`]: rebuild an engine `Surface` from a `Mesh`
+/// entity's vertices and triangular faces (non-triangles and out-of-range
+/// indices are skipped rather than trusted).
+fn surface_from_mesh(mesh: &Mesh) -> Surface {
+    let nodes: Vec<[f64; 3]> = mesh.vertices.iter().map(|v| [v.x, v.y, v.z]).collect();
+    let triangles: Vec<[usize; 3]> = mesh
+        .faces
+        .iter()
+        .filter_map(|f| match f.vertices[..] {
+            [a, b, c] if a < nodes.len() && b < nodes.len() && c < nodes.len() => {
+                Some([a, b, c])
+            }
+            _ => None,
+        })
+        .collect();
+    Surface { nodes, triangles }
+}
+
 /// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a
 /// horizontal plane. Draws the TIN, the datum contour, and a result label.
 fn datum_volume(host: &mut dyn HostApi, cmd: &str) {
@@ -598,11 +616,10 @@ fn datum_volume(host: &mut dyn HostApi, cmd: &str) {
     };
     let surf = match resolve_named_surface(host, args[0]) {
         Ok(s) => s,
-        Err(_) => {
-            let avail = stored_surface_names(host);
+        Err(e) => {
+            let avail = known_surface_names(host);
             host.push_error(&format!(
-                "LS_DATUM: no surface \"{}\" (not imported, not a readable file). \
-                 Imported surfaces: [{}].",
+                "LS_DATUM: no surface \"{}\" ({e}). Known surfaces: [{}].",
                 args[0],
                 avail.join(", ")
             ));
@@ -689,11 +706,11 @@ fn volume(host: &mut dyn HostApi, cmd: &str) {
 
     let top = match resolve_named_surface(host, &top_tok) {
         Ok(s) => s,
-        Err(_) => {
-            let avail = stored_surface_names(host);
+        Err(e) => {
+            let avail = known_surface_names(host);
             host.push_error(&format!(
-                "LS_VOLUME: no surface \"{top_tok}\" (not imported, not a readable file). \
-                 Imported surfaces: [{}]. Build Surface first, then click Volume.",
+                "LS_VOLUME: no surface \"{top_tok}\" ({e}). Known surfaces: [{}]. \
+                 Build Surface first, then click Volume.",
                 avail.join(", ")
             ));
             return;
@@ -701,11 +718,10 @@ fn volume(host: &mut dyn HostApi, cmd: &str) {
     };
     let bottom = match resolve_named_surface(host, &bot_tok) {
         Ok(s) => s,
-        Err(_) => {
-            let avail = stored_surface_names(host);
+        Err(e) => {
+            let avail = known_surface_names(host);
             host.push_error(&format!(
-                "LS_VOLUME: no surface \"{bot_tok}\" (not imported, not a readable file). \
-                 Imported surfaces: [{}].",
+                "LS_VOLUME: no surface \"{bot_tok}\" ({e}). Known surfaces: [{}].",
                 avail.join(", ")
             ));
             return;
@@ -787,8 +803,10 @@ fn read_surface(host: &mut dyn HostApi, path: &str) -> Option<Surface> {
 }
 
 /// Resolve a token to a surface: first a surface built/imported this session
-/// (by name, case-insensitive), otherwise a file path. Lets commands operate on
-/// already-imported surfaces without re-entering coordinates.
+/// (by name, case-insensitive), then tagged geometry already in the drawing
+/// (so names survive DWG save/reopen — see [`find_surface_in_document`]),
+/// otherwise a file path. Lets commands operate on already-imported surfaces
+/// without re-entering coordinates.
 fn resolve_named_surface(host: &mut dyn HostApi, token: &str) -> Result<Surface, String> {
     {
         let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
@@ -796,13 +814,92 @@ fn resolve_named_surface(host: &mut dyn HostApi, token: &str) -> Result<Surface,
             return Ok(s.clone());
         }
     }
+    if let Some((name, surf)) = find_surface_in_document(host.document(), token) {
+        // Cache under the canonical tagged name so later commands skip the scan.
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        st.put_surface(&name, surf.clone());
+        return Ok(surf);
+    }
     read_surface_quiet(token)
 }
 
-/// Names of surfaces stored this session, for "did you mean" error messages.
-fn stored_surface_names(host: &mut dyn HostApi) -> Vec<String> {
-    let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
-    st.surface_names().iter().map(|s| s.to_string()).collect()
+/// The `LANDSURVEY_SURFACE` tag on an entity, as `(name, kind)`, if present.
+fn surface_tag(e: &EntityType) -> Option<(&str, &str)> {
+    let rec = e.common().extended_data.get_record(XDATA_SURFACE)?;
+    let mut strs = rec.values.iter().filter_map(|v| match v {
+        XDataValue::String(s) => Some(s.as_str()),
+        _ => None,
+    });
+    Some((strs.next()?, strs.next()?))
+}
+
+/// Rebuild the surface named `token` from tagged geometry in the drawing.
+/// Returns the canonical tagged name with the surface.
+///
+/// Two sources, matching what the import paths draw:
+/// * a `Mesh` tagged `[name, "TIN"]` (`LS_LANDXML`) — vertices/faces are the
+///   exact surface geometry;
+/// * TIN-edge `Line`s tagged `[name, "TIN"]` (`LS_SURFACE` / `draw_tin`) — the
+///   unique endpoints re-triangulated with [`Surface::from_points`], the same
+///   Delaunay builder that produced them, which reproduces the original TIN.
+fn find_surface_in_document(doc: &acadrust::CadDocument, token: &str) -> Option<(String, Surface)> {
+    // Pass 1: exact geometry from a tagged Mesh.
+    for e in doc.entities() {
+        let EntityType::Mesh(m) = e else { continue };
+        match surface_tag(e) {
+            Some((name, "TIN")) if name.eq_ignore_ascii_case(token) => {
+                let surf = surface_from_mesh(m);
+                if !surf.nodes.is_empty() && !surf.triangles.is_empty() {
+                    return Some((name.to_string(), surf));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: unique endpoints of the tagged TIN edges.
+    let mut canonical: Option<String> = None;
+    let mut seen: std::collections::HashSet<[u64; 3]> = std::collections::HashSet::new();
+    let mut nodes: Vec<[f64; 3]> = Vec::new();
+    for e in doc.entities() {
+        let EntityType::Line(l) = e else { continue };
+        match surface_tag(e) {
+            Some((name, "TIN")) if name.eq_ignore_ascii_case(token) => {
+                canonical.get_or_insert_with(|| name.to_string());
+                for p in [l.start, l.end] {
+                    // Endpoints repeat bit-exactly across shared edges.
+                    if seen.insert([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]) {
+                        nodes.push([p.x, p.y, p.z]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if nodes.len() >= 3 {
+        let surf = Surface::from_points(&nodes);
+        if !surf.triangles.is_empty() {
+            return Some((canonical.unwrap_or_else(|| token.to_string()), surf));
+        }
+    }
+    None
+}
+
+/// Names of surfaces available by name — those stored this session plus those
+/// recoverable from tagged drawing geometry — for "did you mean" messages.
+fn known_surface_names(host: &mut dyn HostApi) -> Vec<String> {
+    let mut names: Vec<String> = {
+        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        st.surface_names().iter().map(|s| s.to_string()).collect()
+    };
+    for e in host.document().entities() {
+        if let Some((name, "TIN")) = surface_tag(e) {
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Uppercased file stem of `path`, used as a surface name / layer suffix.
@@ -1398,4 +1495,112 @@ fn place(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, source: &str)
     let mut rec = ExtendedDataRecord::new(XDATA_PLAN);
     rec.add_value(XDataValue::String(source.to_string()));
     host.write_record(handle, rec);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acadrust::{CadDocument, DwgReader, DwgWriter};
+    use std::io::Cursor;
+
+    /// A small non-cocircular TIN: unit square footprint with a lifted corner
+    /// plus an interior point, so the Delaunay result is unambiguous.
+    fn sample_surface() -> Surface {
+        let nodes = [
+            [0.0, 0.0, 5.0],
+            [10.0, 0.0, 5.0],
+            [0.0, 10.0, 5.0],
+            [10.0, 10.0, 8.0],
+            [4.0, 3.0, 6.0],
+        ];
+        Surface::from_points(&nodes)
+    }
+
+    fn tag(ent: &mut EntityType, name: &str, kind: &str) {
+        let mut rec = ExtendedDataRecord::new(XDATA_SURFACE);
+        rec.add_value(XDataValue::String(name.to_string()));
+        rec.add_value(XDataValue::String(kind.to_string()));
+        ent.common_mut().extended_data.add_record(rec);
+    }
+
+    fn doc_with_tagged_mesh(name: &str) -> CadDocument {
+        let mut doc = CadDocument::default();
+        let mut ent = EntityType::Mesh(mesh_from_surface(&sample_surface()));
+        ent.common_mut().layer = format!("LS-TIN-{name}");
+        tag(&mut ent, name, "TIN");
+        doc.add_entity(ent).expect("add mesh");
+        doc
+    }
+
+    #[test]
+    fn mesh_surface_roundtrip_is_exact() {
+        let surf = sample_surface();
+        let back = surface_from_mesh(&mesh_from_surface(&surf));
+        assert_eq!(back.nodes, surf.nodes);
+        assert_eq!(back.triangles, surf.triangles);
+    }
+
+    #[test]
+    fn rebuilds_surface_from_tagged_mesh_case_insensitive() {
+        let doc = doc_with_tagged_mesh("EG");
+        let (name, surf) = find_surface_in_document(&doc, "eg").expect("found");
+        assert_eq!(name, "EG");
+        assert_eq!(surf.nodes, sample_surface().nodes);
+        assert_eq!(surf.triangles, sample_surface().triangles);
+        assert!(find_surface_in_document(&doc, "OTHER").is_none());
+    }
+
+    #[test]
+    fn rebuilds_surface_from_tagged_tin_edge_lines() {
+        // Draw the sample surface the way LS_SURFACE / draw_tin does: one
+        // tagged Line per unique TIN edge.
+        let surf = sample_surface();
+        let mut doc = CadDocument::default();
+        for e in surf.edges() {
+            let a = surf.nodes[e[0]];
+            let b = surf.nodes[e[1]];
+            let mut ent = EntityType::Line(Line::from_points(
+                Vector3::new(a[0], a[1], a[2]),
+                Vector3::new(b[0], b[1], b[2]),
+            ));
+            tag(&mut ent, "TOPO1", "TIN");
+            doc.add_entity(ent).expect("add line");
+        }
+        let (name, back) = find_surface_in_document(&doc, "topo1").expect("found");
+        assert_eq!(name, "TOPO1");
+        // Same point set through the same Delaunay builder → identical TIN
+        // (node order may differ; compare counts + plan area + volume-bearing
+        // sums instead of raw vectors).
+        assert_eq!(back.nodes.len(), surf.nodes.len());
+        assert_eq!(back.triangles.len(), surf.triangles.len());
+        assert!((back.area_2d() - surf.area_2d()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn surface_survives_dwg_save_reopen() {
+        // The end-to-end story: tag → commit (raw EED) → DWG bytes → reopen →
+        // hydrate → rebuild by name.
+        let mut doc = doc_with_tagged_mesh("EG");
+        crate::xdata_persist::commit_document(&mut doc);
+        let bytes = DwgWriter::write_to_vec(&doc).expect("dwg write");
+        let mut rt = DwgReader::from_stream(Cursor::new(bytes))
+            .read()
+            .expect("dwg read");
+        // Simulate a fresh open: raw blobs only, no parsed records.
+        for ent in rt.entities_mut() {
+            let raw = ent.common().extended_data.raw_dwg_eed.clone();
+            ent.common_mut().extended_data.clear();
+            ent.common_mut().extended_data.raw_dwg_eed = raw;
+        }
+        assert!(
+            find_surface_in_document(&rt, "EG").is_none(),
+            "sanity: tag unreadable before hydrate"
+        );
+        crate::xdata_persist::hydrate_document(&mut rt);
+        let (name, surf) = find_surface_in_document(&rt, "EG")
+            .expect("surface recoverable after DWG round-trip");
+        assert_eq!(name, "EG");
+        assert_eq!(surf.nodes, sample_surface().nodes);
+        assert_eq!(surf.triangles, sample_surface().triangles);
+    }
 }
