@@ -1,6 +1,6 @@
 [package]
 name = "opencad-landsurvey-plugin"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
 license = "GPL-3.0-only"
@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
-# Pinned to the v0.7.4 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "33f1150fadaf23bff10404531c08106dc527266b", features = ["host"] }
+# Pinned to the v0.7.5 RELEASE TAG commit (the MSI host) so contract types match.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "23d9a261b14b0d3799397e6e466332f82d9ab43a", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
 # records, so it names `acadrust` types directly. Must resolve to the *same*
@@ -23,11 +23,11 @@ acadrust = "0.4"
 # Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
 landsurvey = { path = "crates/landsurvey" }
 
-# Match the v0.7.4 release's acadrust EXACTLY (from its Cargo.lock) so the
+# Match the v0.7.5 release's acadrust EXACTLY (from its Cargo.lock) so the
 # loaded library is binary-compatible with the MSI host. (acadrust MAJOR bump
 # 0.3.4 -> 0.4 landed between host 0.6.6 and 0.7.2.)
 [patch.crates-io]
-acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "063da6f23ca151a0b609b38daec51678b809744b" }
+acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "e8e422a83742df747d2702f64cd87536b46e81fa" }
 
 [workspace]
 members = ["crates/landsurvey", "crates/landsurvey-cli"]

@@ -1,7 +1,7 @@
 [plugin]
 id = "opencad.landsurvey"
 name = "Land Survey"
-version = "0.4.0"
+version = "0.4.1"
 description = "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, coordinate transforms (RTS / Helmert), and animated SVG explainers"
 author = "Kevin Griffin"
 license = "GPL-3.0-only"
