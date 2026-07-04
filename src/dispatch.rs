@@ -823,7 +823,7 @@ fn read_surface(host: &mut dyn HostApi, path: &str) -> Option<Surface> {
 /// without re-entering coordinates.
 fn resolve_named_surface(host: &mut dyn HostApi, token: &str) -> Result<Surface, String> {
     {
-        let mut st = crate::state::state();
+        let st = crate::state::state();
         if let Some(s) = st.get_surface(token) {
             return Ok(s.clone());
         }
@@ -903,7 +903,7 @@ fn find_surface_in_document(doc: &acadrust::CadDocument, token: &str) -> Option<
 /// recoverable from tagged drawing geometry — for "did you mean" messages.
 fn known_surface_names(host: &mut dyn HostApi) -> Vec<String> {
     let mut names: Vec<String> = {
-        let mut st = crate::state::state();
+        let st = crate::state::state();
         st.surface_names().iter().map(|s| s.to_string()).collect()
     };
     for e in host.document().entities() {
