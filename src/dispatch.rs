@@ -1577,12 +1577,13 @@ mod tests {
     /// DWG write/read with NO plugin-side codec. Regression guard for the fix
     /// that let us delete the old `xdata_persist` module.
     ///
-    /// The companion layer assertion is intentionally inverted: novel layers
-    /// with no table entry still collapse to layer 0 on save (OCS #252, open).
-    /// When Hakan fixes #252 this test FAILS — that's the signal to flip the
-    /// assert and drop any remaining layer caveats from the docs.
+    /// Layer half mirrors the fixed host contract: since OCS #252 (v0.7.4,
+    /// `Scene::ensure_layer`) the host auto-registers a novel entity layer
+    /// with a real handle on `add_entity`/`update_entity`. A bare CadDocument
+    /// has no host, so the test registers it the same way, then asserts the
+    /// registered layer survives the round-trip.
     #[test]
-    fn stock_records_roundtrip_and_252_layer_canary() {
+    fn stock_records_and_registered_layer_roundtrip() {
         let mut doc = CadDocument::default();
         register_ls_app_ids(&mut doc);
         let mut pt = EntityType::Point(CadPoint::at(Vector3::new(5000.0, 4000.0, 101.5)));
@@ -1591,6 +1592,10 @@ mod tests {
         rec.add_value(XDataValue::String("101".into()));
         rec.add_value(XDataValue::String("IRON PIN".into()));
         pt.common_mut().extended_data.add_record(rec);
+        // What the host's ensure_layer does since #252: table entry + real handle.
+        let mut layer = acadrust::tables::layer::Layer::new("LS-PT-IP");
+        layer.handle = doc.allocate_handle();
+        let _ = doc.layers.add(layer);
         let h = doc.add_entity(pt).expect("add point");
 
         let bytes = DwgWriter::write_to_vec(&doc).expect("dwg write");
@@ -1611,14 +1616,12 @@ mod tests {
             })
             .collect();
         assert_eq!(got, vec!["101".to_string(), "IRON PIN".to_string()]);
-
-        // #252 canary — flips when the host starts registering novel layers.
-        assert_ne!(
+        assert_eq!(
             ent.common().layer,
             "LS-PT-IP",
-            "layer SURVIVED: OCS #252 appears fixed — invert this assert and \
-             remove the layer-collapse caveats"
+            "registered layer lost on round-trip — OCS #252/#67 regressed?"
         );
+        assert!(rt.layers.contains("LS-PT-IP"), "layer table entry lost");
     }
 
     /// A small non-cocircular TIN: unit square footprint with a lifted corner

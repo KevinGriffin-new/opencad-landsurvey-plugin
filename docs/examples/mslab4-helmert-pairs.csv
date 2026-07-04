@@ -1,0 +1,10 @@
+# MicroSurvey GEOM-2031 MS Lab 4 Helmert control pairs (Local src -> Plan dst).
+# srcN, srcE, dstN, dstE. Pairs per the MS CAD Helmert help worked example:
+# 102->1, 103->4, 104->6, 106->2, 107->3, 108->5.
+# Vendor-published golden (full 4-param fit): scale 1.00071265, rotation 9 56 45.
+17.630241, 18.184635, 20, 10
+21.087859, 37.872294, 20, 30
+24.525551, 57.564366, 20, 50
+52.110025, 12.130432, 55, 10
+55.482866, 31.847597, 55, 30
+58.990535, 51.502163, 55, 50
