@@ -20,11 +20,12 @@ mod state;
 /// Reverse-DNS plugin id; the key for per-tab state and the plugins folder.
 pub const PLUGIN_ID: &str = "opencad.landsurvey";
 
-// Keep these fields in sync with `plugin.toml`.
+// Keep these fields in sync with `plugin.toml` (version comes from Cargo.toml,
+// which plugin.toml mirrors — bump both together).
 static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN_ID,
     name: "Land Survey",
-    version: "0.3.2",
+    version: env!("CARGO_PKG_VERSION"),
     description: "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, coordinate transforms (RTS / Helmert), and animated SVG explainers",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 50,

@@ -14,8 +14,11 @@ impl CadModule for LandSurveyModule {
         "Land Survey"
     }
 
-    fn ribbon_groups(&self) -> Vec<RibbonGroup> {
-        vec![
+    fn ribbon_groups(&self) -> &[RibbonGroup] {
+        // Host contract since OCS 73b05e1: return a borrowed slice; build the
+        // tree once and cache it (the canonical OnceLock pattern).
+        static GROUPS: std::sync::OnceLock<Vec<RibbonGroup>> = std::sync::OnceLock::new();
+        GROUPS.get_or_init(|| vec![
             RibbonGroup {
                 title: "Points",
                 tools: vec![
@@ -140,6 +143,6 @@ impl CadModule for LandSurveyModule {
                     }),
                 ],
             },
-        ]
+        ])
     }
 }
