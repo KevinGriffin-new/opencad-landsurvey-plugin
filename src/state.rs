@@ -1,7 +1,28 @@
-//! Per-tab plugin state, stored via the host's `ensure_plugin_state` helper
-//! under the manifest id (`opencad.landsurvey`).
+//! Process-local plugin state. Since OCS 0.7.x the plugin runs in its own
+//! runner process, and the host's `ensure_plugin_state` PANICS out-of-process
+//! by design ("keep state in the plugin crate") — `dyn Any` can't cross the
+//! IPC boundary. A process global is the prescribed replacement; the runner
+//! process is per-plugin, so this is exactly plugin-scoped state.
+//!
+//! Scope change vs the old host-side store: state is now shared across tabs
+//! (one runner serves every tab) instead of per-tab. For the surface store and
+//! the LS_AUTOLABEL toggle that's acceptable — surfaces are keyed by name.
+
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use landsurvey::surface::Surface;
+
+static STATE: OnceLock<Mutex<LandSurveyState>> = OnceLock::new();
+
+/// Lock the process-local Land Survey state. Dispatch is single-threaded per
+/// command, but NEVER call this while an earlier guard from the same call
+/// chain is still alive — `Mutex` is not reentrant.
+pub fn state() -> MutexGuard<'static, LandSurveyState> {
+    STATE
+        .get_or_init(|| Mutex::new(LandSurveyState::default()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// A surface built/imported this session, retained so commands like `LS_VOLUME`
 /// can operate on it by name without re-reading the source file.

@@ -9,10 +9,8 @@ use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::entities::Mesh;
 use acadrust::{Arc as CadArc, Circle, EntityType, Line, Point as CadPoint, Text, Vector3};
 
-use ocs_plugin_api::host::{ensure_plugin_state, HostApi};
+use ocs_plugin_api::host::HostApi;
 
-use crate::state::LandSurveyState;
-use crate::PLUGIN_ID;
 
 use landsurvey::surface::{self, Surface};
 use landsurvey::{cogo, landxml, plan, pnezd, resection, transform, viz};
@@ -225,7 +223,7 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
     // matching MSannotate's ~0.47×H point-number offset for a small marker.
     let off = marker * 0.5 + h * 0.3;
     let auto_label =
-        !ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default).suppress_labels;
+        !crate::state::state().suppress_labels;
 
     host.push_undo("LS_PNEZD import");
     let mut added = 0usize;
@@ -250,7 +248,7 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
     }
 
     let total = {
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         st.imported += added;
         st.imported
     };
@@ -277,7 +275,7 @@ fn auto_label_toggle(host: &mut dyn HostApi, cmd: &str) {
         return;
     }
     let on = {
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         match arg.as_str() {
             "OFF" => st.suppress_labels = true,
             "ON" => st.suppress_labels = false,
@@ -526,7 +524,7 @@ fn build_surface(host: &mut dyn HostApi, cmd: &str) {
     let (npts, ntri, area) = (surf.nodes.len(), surf.triangles.len(), surf.area_2d());
     // Retain the surface so LS_VOLUME / LS_DATUM can use it by name later.
     {
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         st.put_surface(&name, surf);
     }
     host.push_output(&format!(
@@ -574,7 +572,7 @@ fn import_landxml(host: &mut dyn HostApi, cmd: &str) {
         total_tris += ns.surface.triangles.len();
         names.push(ns.name.clone());
         // Retain for LS_VOLUME / LS_DATUM by name (same as LS_SURFACE).
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         st.put_surface(&ns.name, ns.surface.clone());
     }
     host.bump_geometry();
@@ -825,14 +823,14 @@ fn read_surface(host: &mut dyn HostApi, path: &str) -> Option<Surface> {
 /// without re-entering coordinates.
 fn resolve_named_surface(host: &mut dyn HostApi, token: &str) -> Result<Surface, String> {
     {
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         if let Some(s) = st.get_surface(token) {
             return Ok(s.clone());
         }
     }
     if let Some((name, surf)) = find_surface_in_document(host.document(), token) {
         // Cache under the canonical tagged name so later commands skip the scan.
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         st.put_surface(&name, surf.clone());
         return Ok(surf);
     }
@@ -905,7 +903,7 @@ fn find_surface_in_document(doc: &acadrust::CadDocument, token: &str) -> Option<
 /// recoverable from tagged drawing geometry — for "did you mean" messages.
 fn known_surface_names(host: &mut dyn HostApi) -> Vec<String> {
     let mut names: Vec<String> = {
-        let st = ensure_plugin_state(host, PLUGIN_ID, LandSurveyState::default);
+        let mut st = crate::state::state();
         st.surface_names().iter().map(|s| s.to_string()).collect()
     };
     for e in host.document().entities() {
