@@ -51,7 +51,11 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
     match verb {
         "LS_HELLO" => {
             host.push_info(
-                "Land Survey plugin ready. Commands: LS_PNEZD, LS_IMPORTPLAN, LS_INVERSE, LS_LIST.",
+                "Land Survey plugin ready. Points: LS_PNEZD, LS_LIST, LS_AUTOLABEL. \
+                 Import: LS_IMPORTPLAN, LS_LANDXML. \
+                 Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
+                 COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
+                 See PLUGIN.md for usage.",
             );
             true
         }
