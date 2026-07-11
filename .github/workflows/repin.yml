@@ -1,0 +1,237 @@
+name: repin
+
+# Watch upstream Open CAD Studio releases and open a re-pin PR when a new
+# release tag appears (ABI approach B: the plugin must be built against the
+# same ocs_plugin_api commit and acadrust rev as the shipped host).
+#
+# The bot only opens a PR — merging and pushing the v* tag (which cuts the
+# actual plugin release via release.yml) stay with a human. A failure of the
+# api-version gate, the test suite, or the end-to-end host check means the
+# mechanical path is not enough and a source change is needed; the workflow
+# fails loudly so that shows up as a red run instead of a broken PR.
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream tag to re-pin to (default: latest release)"
+        required: false
+
+concurrency:
+  group: repin
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: HakanSeven12/OpenCADStudio
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      repin: ${{ steps.check.outputs.repin }}
+      tag: ${{ steps.check.outputs.tag }}
+      host_sha: ${{ steps.check.outputs.host_sha }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compare latest upstream release against the current pin
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)
+          fi
+          # Deref annotated tags to the commit sha.
+          SHA=$(gh api "repos/$UPSTREAM/commits/$TAG" --jq .sha)
+          CURRENT=$(grep -oP 'OpenCADStudio", rev = "\K[0-9a-f]{40}' Cargo.toml)
+          echo "upstream $TAG = $SHA ; pinned = $CURRENT"
+          if [ "$SHA" = "$CURRENT" ]; then
+            echo "Pin is current — nothing to do."
+            echo "repin=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git ls-remote --exit-code origin "refs/heads/repin/$TAG" >/dev/null 2>&1; then
+            echo "Branch repin/$TAG already exists — PR pending or handled."
+            echo "repin=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "repin=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "host_sha=$SHA" >> "$GITHUB_OUTPUT"
+
+  repin:
+    needs: detect
+    if: needs.detect.outputs.repin == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
+      HOST_SHA: ${{ needs.detect.outputs.host_sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: repin
+
+      - name: Derive new pins from the upstream tag
+        id: pins
+        run: |
+          # acadrust rev = whatever the host release locked (its Cargo.lock).
+          gh api "repos/$UPSTREAM/contents/Cargo.lock?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.lock
+          ACADRUST=$(python3 - <<'EOF'
+          lines = open("/tmp/host-Cargo.lock").read().splitlines()
+          for i, l in enumerate(lines):
+              if l.strip() == 'name = "acadrust"':
+                  for m in lines[i : i + 4]:
+                      if m.startswith("source") and "#" in m:
+                          print(m.split("#")[1].rstrip('"'))
+                          raise SystemExit
+          raise SystemExit("acadrust source rev not found in host Cargo.lock")
+          EOF
+          )
+          OLD_ACADRUST=$(grep -oP 'acadrust", rev = "\K[0-9a-f]{40}' Cargo.toml)
+          echo "acadrust=$ACADRUST" >> "$GITHUB_OUTPUT"
+          echo "old_acadrust=$OLD_ACADRUST" >> "$GITHUB_OUTPUT"
+          echo "acadrust: $OLD_ACADRUST -> $ACADRUST"
+
+      - name: Gate on the plugin API version handshake
+        run: |
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/manifest.rs
+          MAX=$(grep -oP 'API_VERSION: u32 = \K\d+' /tmp/manifest.rs)
+          MIN=$(grep -oP 'API_VERSION_MIN_SUPPORTED: u32 = \K\d+' /tmp/manifest.rs)
+          OURS=$(grep -oP 'api_version = \K\d+' plugin.toml)
+          echo "host accepts [$MIN, $MAX]; plugin declares $OURS"
+          if [ "$OURS" -lt "$MIN" ] || [ "$OURS" -gt "$MAX" ]; then
+            echo "::error::Host $TAG no longer accepts api_version=$OURS — a source migration is needed, not a re-pin."
+            exit 1
+          fi
+
+      - name: Rewrite pins and bump the patch version
+        id: bump
+        env:
+          ACADRUST: ${{ steps.pins.outputs.acadrust }}
+        run: |
+          NEWVER=$(python3 - <<'EOF'
+          import os, re
+
+          tag, host_sha, acadrust = os.environ["TAG"], os.environ["HOST_SHA"], os.environ["ACADRUST"]
+
+          cargo = open("Cargo.toml").read()
+          cargo = re.sub(r'(OpenCADStudio", rev = ")[0-9a-f]{40}', r"\g<1>" + host_sha, cargo)
+          cargo = re.sub(r'(acadrust", rev = ")[0-9a-f]{40}', r"\g<1>" + acadrust, cargo)
+          # Keep the pin comments honest: they name the release the revs came from.
+          cargo = re.sub(r"Pinned to the v[\d.]+ RELEASE TAG commit", f"Pinned to the {tag} RELEASE TAG commit", cargo)
+          cargo = re.sub(r"Match the v[\d.]+ release's acadrust", f"Match the {tag} release's acadrust", cargo)
+
+          ver = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', cargo, re.M).groups()
+          new = f"{ver[0]}.{ver[1]}.{int(ver[2]) + 1}"
+          cargo = re.sub(r'^version = "[\d.]+"', f'version = "{new}"', cargo, count=1, flags=re.M)
+          open("Cargo.toml", "w").write(cargo)
+
+          plug = open("plugin.toml").read()
+          plug = re.sub(r'^version = "[\d.]+"', f'version = "{new}"', plug, count=1, flags=re.M)
+          open("plugin.toml", "w").write(plug)
+          print(new)
+          EOF
+          )
+          echo "newver=$NEWVER" >> "$GITHUB_OUTPUT"
+          git diff
+
+      - name: Build and test the plugin against the new pins
+        run: |
+          cargo build --release
+          cargo test --workspace
+
+      - name: Build the host at the release tag
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            libgl1-mesa-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libwayland-dev libfontconfig1-dev libfreetype6-dev
+          git clone --depth 1 --branch "$TAG" "https://github.com/$UPSTREAM" host
+          cargo build --manifest-path host/Cargo.toml
+
+      - name: End-to-end — host loads the plugin and dispatches LS_ commands
+        run: |
+          STAGE=$(mktemp -d)
+          mkdir -p "$STAGE/plugins/opencad.landsurvey"
+          cp plugin.toml target/release/libopencad_landsurvey_plugin.so \
+            "$STAGE/plugins/opencad.landsurvey/"
+          printf '1,5000.00,5000.00,100.00,IPF\n2,5100.00,5050.00,101.25,IPF\n3,5200.00,4980.00,99.80,MON\n' \
+            > "$STAGE/points.csv"
+          {
+            echo '{"op":"new"}'
+            echo "{\"op\":\"run\",\"cmd\":\"LS_PNEZD $STAGE/points.csv\"}"
+            echo '{"op":"entities"}'
+            echo '{"op":"layers"}'
+            echo '{"op":"run","cmd":"LS_INVERSE 5000 5000 5100 5050 draw"}'
+          } | OCS_PLUGINS_DIR="$STAGE/plugins" host/target/debug/OpenCADStudio --serve \
+            | tee /tmp/serve.out
+          python3 - <<'EOF'
+          import json
+
+          replies = [json.loads(l) for l in open("/tmp/serve.out") if l.startswith("{")]
+          # ready banner, new, LS_PNEZD, entities, layers, LS_INVERSE
+          pnezd = next(r for r in replies if r.get("cmd", "").startswith("LS_PNEZD"))
+          assert pnezd["added"] == 6, f"LS_PNEZD drew {pnezd['added']} entities, expected 6 (3 points + 3 labels)"
+          ents = next(r for r in replies if "by_type" in r and r["total"] > 0)
+          assert ents["by_type"].get("Point") == 3 and ents["by_type"].get("Text") == 3, ents
+          layers = next(r for r in replies if "layers" in r)
+          names = {l["name"] for l in layers["layers"]}
+          assert {"LS-PT-IPF", "LS-PT-MON"} <= names, f"missing LS-PT-* layers: {names}"
+          inverse = next(r for r in replies if r.get("cmd", "").startswith("LS_INVERSE"))
+          assert inverse["added"] == 3, f"LS_INVERSE draw added {inverse['added']}, expected 3 (line + 2 labels)"
+          print("end-to-end OK: plugin loaded, LS_PNEZD and LS_INVERSE dispatched")
+          EOF
+
+      - name: Open the re-pin PR
+        env:
+          ACADRUST: ${{ steps.pins.outputs.acadrust }}
+          OLD_ACADRUST: ${{ steps.pins.outputs.old_acadrust }}
+          NEWVER: ${{ steps.bump.outputs.newver }}
+        run: |
+          ACAD_SHORT=${ACADRUST:0:7}
+          # What moved in acadrust between the pins, for the PR body.
+          ACAD_LOG=$(gh api "repos/HakanSeven12/acadrust/compare/$OLD_ACADRUST...$ACADRUST" \
+            --jq '[.commits[].commit.message | split("\n")[0] | "- " + .] | join("\n")' || echo "- (compare unavailable)")
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "repin/$TAG"
+          git add Cargo.toml plugin.toml
+          git commit -m "release: v$NEWVER — re-pin to host $TAG (acadrust $ACAD_SHORT)" \
+            -m "Mechanical pin bump per the rebuild rule, opened by the repin
+          workflow. Tests and the headless host end-to-end check ran green in
+          the workflow run that opened this PR."
+          git push origin "repin/$TAG"
+
+          gh pr create \
+            --title "release: v$NEWVER — re-pin to host $TAG (acadrust $ACAD_SHORT)" \
+            --body "Automated re-pin: upstream released [\`$TAG\`](https://github.com/$UPSTREAM/releases/tag/$TAG).
+
+          | pin | old | new |
+          |---|---|---|
+          | \`ocs_plugin_api\` | (previous) | \`$HOST_SHA\` ($TAG) |
+          | \`acadrust\` | \`$OLD_ACADRUST\` | \`$ACADRUST\` |
+
+          **Checks run in this workflow:** api-version gate, \`cargo test --workspace\`,
+          and the headless end-to-end check (host built at \`$TAG\` loads the plugin,
+          \`LS_PNEZD\` imports 3 points + labels onto \`LS-PT-*\` layers, \`LS_INVERSE draw\`
+          draws the labeled line).
+
+          **acadrust changes between the pins:**
+          $ACAD_LOG
+
+          **After merging**, cut the release:
+          \`\`\`
+          git tag v$NEWVER && git push origin v$NEWVER
+          \`\`\`"
