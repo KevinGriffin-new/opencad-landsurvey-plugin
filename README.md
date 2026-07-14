@@ -24,7 +24,7 @@ exports the two C symbols the host loader expects (via
   (Tienstra, with danger-circle detection). Draws the station, rays to each
   known point, and residuals. See [`docs/resection-design.md`](docs/resection-design.md)
   and the [`docs/examples/resection-demo.csv`](docs/examples/resection-demo.csv) seed.
-- **Plan** — recognized-plan (`plan2cad` JSON) import.
+- **Plan** — recognized-plan (`plan2cad` / `plat2json` JSON) import; ordered chains import as LWPolylines with duplicate flattened segments skipped.
 - **Animated SVG explainers** — Helmert / RTS / inverse / resection can emit a
   self-contained looping SVG that shows the operation step by step (with a
   `teach` mode that amplifies near-grid transforms for classroom / outreach

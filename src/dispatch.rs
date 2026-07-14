@@ -7,7 +7,9 @@ use std::fs;
 
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::entities::Mesh;
-use acadrust::{Arc as CadArc, Circle, EntityType, Line, Point as CadPoint, Text, Vector3};
+use acadrust::{
+    Arc as CadArc, Circle, EntityType, Line, LwPolyline, Point as CadPoint, Text, Vector2, Vector3,
+};
 
 use ocs_plugin_api::host::HostApi;
 
@@ -1465,8 +1467,10 @@ fn list_points(host: &mut dyn HostApi) {
 }
 
 /// `LS_IMPORTPLAN <path.json>` — import recognized plan geometry (the
-/// `plan2cad` pipeline's JSON) faithfully: each element becomes an entity on
-/// its named layer, tagged with `LANDSURVEY_PLAN` XDATA (source filename).
+/// `plan2cad` / `plat2json` pipelines' JSON) faithfully: each element becomes
+/// an entity on its named layer, tagged with `LANDSURVEY_PLAN` XDATA (source
+/// filename). Ordered chains (`polylines` / `plines`) import as LWPolylines;
+/// line segments that merely re-state a chain's edges are skipped.
 fn import_plan(host: &mut dyn HostApi, cmd: &str) {
     let arg = first_arg(cmd);
     if arg.is_empty() {
@@ -1496,7 +1500,37 @@ fn import_plan(host: &mut dyn HostApi, cmd: &str) {
     let mut n = 0usize;
     let mut layers = std::collections::BTreeSet::new();
 
+    // Polylines first (plat2json chains — traced, and arc-fitted with bulge
+    // vertices). Each chain becomes one LWPolyline; a chain whose last point
+    // repeats the first imports closed. Their edges and arc segments are
+    // remembered so the flattened `lines`/`arcs` duplicates the pipeline also
+    // emits (for sinks without polyline support) aren't drawn twice.
+    let mut chain_edges: std::collections::HashSet<plan::SegKey> =
+        std::collections::HashSet::new();
+    let mut chain_arcs: Vec<(f64, f64, f64, f64, f64)> = Vec::new();
+    for pl in &plan.polylines {
+        chain_edges.extend(pl.edge_keys());
+        chain_arcs.extend(pl.bulged_segments());
+        let (pts, closed) = pl.ring();
+        if pts.len() < 2 {
+            continue;
+        }
+        let mut lw = LwPolyline::new();
+        for (x, y, bulge) in pts {
+            lw.add_point_with_bulge(Vector2::new(*x, *y), *bulge);
+        }
+        lw.is_closed = closed;
+        place(host, EntityType::LwPolyline(lw), &pl.layer, &source);
+        layers.insert(pl.layer.clone());
+        n += 1;
+    }
+
+    let mut dup = 0usize;
     for (x1, y1, x2, y2, layer) in &plan.lines {
+        if chain_edges.contains(&plan::seg_key(*x1, *y1, *x2, *y2)) {
+            dup += 1;
+            continue;
+        }
         let ent = EntityType::Line(Line::from_points(
             Vector3::new(*x1, *y1, 0.0),
             Vector3::new(*x2, *y2, 0.0),
@@ -1505,7 +1539,16 @@ fn import_plan(host: &mut dyn HostApi, cmd: &str) {
         layers.insert(layer.clone());
         n += 1;
     }
+    // Matching a flattened arc entry to a bulged chain segment: both come from
+    // the same rounded values, so 1e-3 drawing units is ample.
+    const ARC_DUP_TOL: f64 = 1e-3;
     for (cx, cy, r, start_deg, end_deg, layer) in &plan.arcs {
+        if chain_arcs.iter().any(|&seg| {
+            plan::arc_duplicates_segment(*cx, *cy, *r, *start_deg, *end_deg, seg, ARC_DUP_TOL)
+        }) {
+            dup += 1;
+            continue;
+        }
         // Source angles are degrees; acadrust arc angles are radians.
         let ent = EntityType::Arc(CadArc::from_center_radius_angles(
             Vector3::new(*cx, *cy, 0.0),
@@ -1536,8 +1579,13 @@ fn import_plan(host: &mut dyn HostApi, cmd: &str) {
 
     host.bump_geometry();
     host.set_dirty();
+    let dup_note = if dup > 0 {
+        format!(" ({dup} element(s) already covered by polylines skipped)")
+    } else {
+        String::new()
+    };
     host.push_output(&format!(
-        "LS_IMPORTPLAN: {n} entities on {} layer(s) from {source}.",
+        "LS_IMPORTPLAN: {n} entities on {} layer(s) from {source}.{dup_note}",
         layers.len()
     ));
 }
@@ -1561,6 +1609,105 @@ mod tests {
     use acadrust::{CadDocument, DwgReader, DwgWriter};
     use std::io::Cursor;
 
+    /// Minimal in-memory host: enough of `HostApi` for the dispatch paths the
+    /// tests drive (document + add_entity + XDATA + command-line capture).
+    /// Interactive/state/reader surfaces are unreachable from those paths and
+    /// panic if hit.
+    struct TestHost {
+        doc: CadDocument,
+        log: Vec<String>,
+    }
+
+    impl TestHost {
+        fn new() -> Self {
+            TestHost { doc: CadDocument::default(), log: Vec::new() }
+        }
+    }
+
+    impl HostApi for TestHost {
+        fn tab_index(&self) -> usize {
+            0
+        }
+        fn document(&self) -> &CadDocument {
+            &self.doc
+        }
+        fn document_mut(&mut self) -> &mut CadDocument {
+            &mut self.doc
+        }
+        fn add_entity(&mut self, entity: EntityType) -> acadrust::Handle {
+            self.doc.add_entity(entity).expect("add_entity")
+        }
+        fn bump_geometry(&mut self) {}
+        fn read_record(
+            &self,
+            handle: acadrust::Handle,
+            app_name: &str,
+        ) -> Option<&ExtendedDataRecord> {
+            self.doc
+                .get_entity(handle)?
+                .common()
+                .extended_data
+                .get_record(app_name)
+        }
+        fn write_record(&mut self, handle: acadrust::Handle, record: ExtendedDataRecord) -> bool {
+            // Mirror the host's ensure_app_id contract (OCS #249).
+            if !self.doc.app_ids.contains(&record.application_name) {
+                let mut app = AppId::new(&record.application_name);
+                app.set_handle(self.doc.allocate_handle());
+                let _ = self.doc.app_ids.add(app);
+            }
+            match self.doc.get_entity_mut(handle) {
+                Some(e) => {
+                    e.common_mut().extended_data.add_record(record);
+                    true
+                }
+                None => false,
+            }
+        }
+        fn remove_record(&mut self, _handle: acadrust::Handle, _app_name: &str) -> bool {
+            false
+        }
+        fn push_undo(&mut self, _label: &str) {}
+        fn set_dirty(&mut self) {}
+        fn push_info(&mut self, msg: &str) {
+            self.log.push(msg.to_string());
+        }
+        fn push_output(&mut self, msg: &str) {
+            self.log.push(msg.to_string());
+        }
+        fn push_error(&mut self, msg: &str) {
+            self.log.push(format!("ERROR: {msg}"));
+        }
+        fn start_interactive(
+            &mut self,
+            _command: Box<dyn ocs_plugin_api::host::InteractiveCommand>,
+        ) {
+            unimplemented!("not exercised by these tests")
+        }
+        fn plugin_state_any(
+            &self,
+            _plugin_id: &str,
+        ) -> Option<&(dyn std::any::Any + Send + Sync)> {
+            None
+        }
+        fn plugin_state_any_mut(
+            &mut self,
+            _plugin_id: &str,
+        ) -> Option<&mut (dyn std::any::Any + Send + Sync)> {
+            None
+        }
+        fn ensure_plugin_state_any(
+            &mut self,
+            _plugin_id: &'static str,
+            _init: &mut dyn FnMut() -> Box<dyn std::any::Any + Send + Sync>,
+        ) -> &mut (dyn std::any::Any + Send + Sync) {
+            unimplemented!("not exercised by these tests")
+        }
+        fn document_reader(&self) -> Box<dyn ocs_plugin_api::host::DocumentReader + '_> {
+            unimplemented!("not exercised by these tests")
+        }
+    }
+
     /// Register the LANDSURVEY_* APPIDs with real handles, as the fixed host
     /// `ensure_app_id` does on `write_record` (OCS #249). A standalone test
     /// document has no host, so the writer needs this done by hand for the
@@ -1573,6 +1720,128 @@ mod tests {
                 let _ = doc.app_ids.add(app);
             }
         }
+    }
+
+    /// LS_IMPORTPLAN with plat2json `--vectorize trace` output: the chain
+    /// imports as one closed LWPolyline, the flattened duplicate `lines` are
+    /// skipped, and independent lines / texts still import.
+    #[test]
+    fn import_plan_polylines_become_lwpolylines_and_dedupe_lines() {
+        // A closed triangle chain, its three flattened duplicates (one
+        // reversed, as Hough/tracing may emit), one unrelated line, one text.
+        let json = r#"{
+            "lines": [
+                [0.0, 0.0, 10.5, 0.0, "PROPERTY_LINE"],
+                [10.5, 0.0, 10.5, 7.25, "PROPERTY_LINE"],
+                [0.0, 0.0, 10.5, 7.25, "PROPERTY_LINE"],
+                [100.0, 100.0, 200.0, 200.0, "EASEMENT"]
+            ],
+            "arcs": [],
+            "circles": [],
+            "texts": [[5.0, 5.0, "N88%%d16'E", "BEARING"]],
+            "polylines": [
+                [[0.0, 0.0], [10.5, 0.0], [10.5, 7.25], [0.0, 0.0], "PROPERTY_LINE"]
+            ]
+        }"#;
+        let path = std::env::temp_dir().join(format!("ls_plan_{}.json", std::process::id()));
+        std::fs::write(&path, json).expect("write plan json");
+
+        let mut host = TestHost::new();
+        import_plan(&mut host, &format!("LS_IMPORTPLAN {}", path.display()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut polylines = 0;
+        let mut lines = 0;
+        let mut texts = 0;
+        for e in host.doc.entities() {
+            match e {
+                EntityType::LwPolyline(pl) => {
+                    polylines += 1;
+                    assert!(pl.is_closed, "ring chain must import closed");
+                    assert_eq!(pl.vertices.len(), 3, "closing vertex must be dropped");
+                    assert_eq!(pl.common.layer, "PROPERTY_LINE");
+                }
+                EntityType::Line(l) => {
+                    lines += 1;
+                    assert_eq!(l.common.layer, "EASEMENT", "only the non-duplicate line");
+                }
+                EntityType::Text(_) => texts += 1,
+                other => panic!("unexpected entity: {other:?}"),
+            }
+        }
+        assert_eq!((polylines, lines, texts), (1, 1, 1));
+
+        let last = host.log.last().expect("report line");
+        assert!(last.contains("3 entities"), "report: {last}");
+        assert!(last.contains("3 element(s) already covered"), "report: {last}");
+    }
+
+    /// LS_IMPORTPLAN with the VERBATIM output of plat2json's fit_arcs.py for a
+    /// synthetic plat (one straight 3-vertex chain + one 40 m arc, 10°→80°):
+    /// both chains import as LWPolylines — the arc chain with its bulge — and
+    /// every flattened duplicate (`lines` and the `arcs` entry) is skipped.
+    /// This is the cross-repo interchange contract, pinned end to end.
+    #[test]
+    fn import_plan_fit_arcs_output_roundtrip() {
+        let json = r#"{"lines": [[0.0, 0.0, 30.0, 0.0, "PROPERTY_LINE"], [30.0, 0.0, 30.0, 20.0, "PROPERTY_LINE"]], "arcs": [[100.0, 50.0, 40.0, 10.0, 80.0, "PROPERTY_LINE"]], "circles": [], "texts": [], "polylines": [[[0.0, 0.0], [30.0, 0.0], [30.0, 20.0], "PROPERTY_LINE"], [[139.3923, 56.9459, 0.315299], [106.9459, 89.3923], "PROPERTY_LINE"]]}"#;
+        let path = std::env::temp_dir().join(format!("ls_arcs_{}.json", std::process::id()));
+        std::fs::write(&path, json).expect("write plan json");
+
+        let mut host = TestHost::new();
+        import_plan(&mut host, &format!("LS_IMPORTPLAN {}", path.display()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut chains = Vec::new();
+        for e in host.doc.entities() {
+            match e {
+                EntityType::LwPolyline(pl) => chains.push(pl),
+                other => panic!("everything should dedupe into polylines, got {other:?}"),
+            }
+        }
+        assert_eq!(chains.len(), 2);
+        let straight = chains.iter().find(|p| p.vertices.len() == 3).expect("straight chain");
+        assert!(straight.vertices.iter().all(|v| v.bulge == 0.0));
+        let arc = chains.iter().find(|p| p.vertices.len() == 2).expect("arc chain");
+        assert_eq!(arc.vertices[0].bulge, 0.315299, "bulge = tan(70°/4)");
+        assert_eq!(arc.vertices[1].bulge, 0.0);
+
+        let last = host.log.last().expect("report line");
+        assert!(last.contains("2 entities"), "report: {last}");
+        assert!(
+            last.contains("3 element(s) already covered"),
+            "2 lines + 1 arc deduped: {last}"
+        );
+    }
+
+    /// An `arcs` entry that does NOT match any bulged chain segment still
+    /// imports as a standalone Arc entity (e.g. curve-table arcs from
+    /// arc_refine.py alongside traced chains).
+    #[test]
+    fn import_plan_standalone_arc_still_imports() {
+        let json = r#"{
+            "arcs": [[500.0, 500.0, 25.0, 0.0, 45.0, "CURVE"]],
+            "polylines": [[[139.3923, 56.9459, 0.315299], [106.9459, 89.3923], "PROPERTY_LINE"]]
+        }"#;
+        let path = std::env::temp_dir().join(format!("ls_arc2_{}.json", std::process::id()));
+        std::fs::write(&path, json).expect("write plan json");
+
+        let mut host = TestHost::new();
+        import_plan(&mut host, &format!("LS_IMPORTPLAN {}", path.display()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut arcs = 0;
+        let mut polylines = 0;
+        for e in host.doc.entities() {
+            match e {
+                EntityType::Arc(a) => {
+                    arcs += 1;
+                    assert_eq!(a.common.layer, "CURVE");
+                }
+                EntityType::LwPolyline(_) => polylines += 1,
+                other => panic!("unexpected entity: {other:?}"),
+            }
+        }
+        assert_eq!((polylines, arcs), (1, 1));
     }
 
     /// Stock acadrust (e88a9a6+, OCS #249): `ExtendedData::records` survive a
