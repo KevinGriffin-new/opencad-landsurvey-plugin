@@ -223,6 +223,19 @@ mod tests {
     }
 
     #[test]
+    fn lines_without_layer_error() {
+        // A `lines` entry missing its layer string rejects the WHOLE file —
+        // the exact symptom of importing pre-fix cogo_assemble.py output
+        // (plan2/assoc-v1 emitted 4-element lines until 2026-07). The error
+        // names the shape so the emitter side is debuggable from the message.
+        let e = parse(r#"{"lines": [[100.0, 200.0, 300.0, 200.0]]}"#).unwrap_err();
+        assert!(
+            e.to_string().contains("invalid length 4"),
+            "want a shape error naming the 4-element entry, got: {e}"
+        );
+    }
+
+    #[test]
     fn polyline_malformed_elements_error() {
         // Layer missing (all points) and non-numeric coordinates both fail
         // loudly rather than importing garbage.
