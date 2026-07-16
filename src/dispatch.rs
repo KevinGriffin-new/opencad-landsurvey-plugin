@@ -1813,6 +1813,175 @@ mod tests {
         );
     }
 
+    /// LS_IMPORTPLAN with the VERBATIM output of plat2json's cogo_assemble.py
+    /// (plan-JSON `plan2/assoc-v1`) for a synthetic 4-course diamond plat that
+    /// closes exactly: the `lines` block imports as Line entities on its layer,
+    /// and the assoc-only keys (courses/rings/report/…) are ignored. Pins the
+    /// back-compat path the emitter's docstring promises — its `lines` entries
+    /// MUST carry the layer string or the whole file is rejected (the 0.4.4-era
+    /// regression this guards against).
+    #[test]
+    fn import_plan_cogo_assemble_output_roundtrip() {
+        let json = r#"{
+ "schema": "plan2/assoc-v1",
+ "unit": "ft",
+ "source": {
+  "key": "synth_assoc_key.json",
+  "reads": "synth_assoc_reads.json",
+  "pdf": "synthetic_diamond.pdf",
+  "page": 1
+ },
+ "rotation_deg": 0.0,
+ "rotation_inliers": "4/4",
+ "scale_unit_per_pt": 0.499995,
+ "scale_samples": 4,
+ "courses": [
+  {
+   "seg": 0,
+   "px": [
+    300.0,
+    500.0,
+    500.0,
+    300.0
+   ],
+   "flags": [],
+   "bearing": "N 45°00'00\" E",
+   "azimuth": 45.0,
+   "sense": -1,
+   "distance": 141.42,
+   "distance_raw": "141.42'"
+  },
+  {
+   "seg": 1,
+   "px": [
+    500.0,
+    300.0,
+    300.0,
+    100.0
+   ],
+   "flags": [],
+   "bearing": "N 45°00'00\" W",
+   "azimuth": 315.0,
+   "sense": -1,
+   "distance": 141.42,
+   "distance_raw": "141.42'"
+  },
+  {
+   "seg": 2,
+   "px": [
+    300.0,
+    100.0,
+    100.0,
+    300.0
+   ],
+   "flags": [],
+   "bearing": "S 45°00'00\" W",
+   "azimuth": 225.0,
+   "sense": -1,
+   "distance": 141.42,
+   "distance_raw": "141.42'"
+  },
+  {
+   "seg": 3,
+   "px": [
+    100.0,
+    300.0,
+    300.0,
+    500.0
+   ],
+   "flags": [],
+   "bearing": "S 45°00'00\" E",
+   "azimuth": 135.0,
+   "sense": -1,
+   "distance": 141.42,
+   "distance_raw": "141.42'"
+  }
+ ],
+ "rings": [
+  {
+   "segs": [
+    0,
+    3,
+    2,
+    1
+   ],
+   "legs": 4,
+   "perimeter": 565.68,
+   "misclosure": 0.0,
+   "theta_ring": 0.0,
+   "precision": "exact"
+  }
+ ],
+ "links": [],
+ "lines": [
+  [
+   300.0,
+   500.0,
+   500.0,
+   300.0,
+   "PROPERTY_LINE"
+  ],
+  [
+   500.0,
+   300.0,
+   300.0,
+   100.0,
+   "PROPERTY_LINE"
+  ],
+  [
+   300.0,
+   100.0,
+   100.0,
+   300.0,
+   "PROPERTY_LINE"
+  ],
+  [
+   100.0,
+   300.0,
+   300.0,
+   500.0,
+   "PROPERTY_LINE"
+  ]
+ ],
+ "report": {
+  "segments": 4,
+  "edges": 4,
+  "faces": 1,
+  "faces_fully_coursed": 1,
+  "courses": 4,
+  "courses_clean": 4,
+  "courses_flagged": 0,
+  "rings_closed": 1,
+  "rings_beyond_tolerance": 0,
+  "links_evaluated": 0,
+  "links_not_evaluable": 0,
+  "links_beyond_tolerance": 0,
+  "needs_human": false
+ }
+}"#;
+        let path = std::env::temp_dir().join(format!("ls_assoc_{}.json", std::process::id()));
+        std::fs::write(&path, json).expect("write plan json");
+
+        let mut host = TestHost::new();
+        import_plan(&mut host, &format!("LS_IMPORTPLAN {}", path.display()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut lines = Vec::new();
+        for e in host.doc.entities() {
+            match e {
+                EntityType::Line(l) => {
+                    assert_eq!(l.common.layer, "PROPERTY_LINE");
+                    lines.push(l);
+                }
+                other => panic!("assoc plans carry only lines, got {other:?}"),
+            }
+        }
+        assert_eq!(lines.len(), 4, "one Line per planarized edge");
+
+        let last = host.log.last().expect("report line");
+        assert!(last.contains("4 entities on 1 layer(s)"), "report: {last}");
+    }
+
     /// An `arcs` entry that does NOT match any bulged chain segment still
     /// imports as a standalone Arc entity (e.g. curve-table arcs from
     /// arc_refine.py alongside traced chains).
