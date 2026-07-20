@@ -1,0 +1,238 @@
+# Keep the host pins current, automatically.
+#
+# This plugin is a cdylib the host dlopens, and it names `acadrust` types
+# directly, so it has to be built against EXACTLY the `ocs_plugin_api` and
+# `acadrust` revisions the host release shipped. Every host release therefore
+# needs a manual four-value edit — which is how PR #9 ended up pinned to a
+# host version that was already superseded before it merged.
+#
+# So: poll upstream releases, derive the pins, build, test, and open (or
+# refresh) a single PR. A human still reviews and merges; the machine only
+# does the archaeology.
+#
+# THE TRAP THIS EXISTS TO AVOID: the host pins acadrust by *branch*
+#   acadrust = { git = "...acadifc", branch = "main" }
+# so the tag's Cargo.toml does NOT say which acadrust that release shipped —
+# it says "whatever main pointed at when you look". Only the tag's Cargo.lock
+# records the actual rev. Always read the lockfile.
+#
+# The branch is rebuilt from the default branch on every run and force-pushed,
+# so a stale proposal can't survive: if a newer host release lands, the next
+# run overwrites the PR rather than leaving two competing repins open.
+
+name: Re-pin to host release
+
+on:
+  schedule:
+    - cron: "43 6 * * *"   # daily; host releases are far rarer than this
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Host release tag to pin to (e.g. v0.8.4); empty = latest"
+        required: false
+
+env:
+  UPSTREAM: HakanSeven12/OpenCADStudio
+  BRANCH: repin/host
+
+concurrency:
+  group: repin-host
+  cancel-in-progress: false
+
+jobs:
+  repin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write        # push the repin branch
+      pull-requests: write   # open/update the PR
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Derive the pins from the host release
+        id: pins
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release list --repo "$UPSTREAM" --limit 1 \
+                    --json tagName -q '.[0].tagName')
+          fi
+          [ -n "$TAG" ] || { echo "no upstream releases found"; exit 1; }
+
+          # Resolve via the commits endpoint so annotated tags deref correctly.
+          SHA=$(gh api "repos/$UPSTREAM/commits/$TAG" --jq .sha)
+
+          # The acadrust rev comes from the LOCKFILE — see header comment.
+          LOCK=$(gh api "repos/$UPSTREAM/contents/Cargo.lock?ref=$TAG" --jq .content | base64 -d)
+          SRC=$(printf '%s' "$LOCK" | grep -A3 '^name = "acadrust"' | grep '^source' | head -1)
+          [ -n "$SRC" ] || { echo "no git source for acadrust in the host lockfile at $TAG"; exit 1; }
+          ACAD_URL=$(printf '%s' "$SRC" | sed -E 's|.*git\+([^?#]+).*|\1|')
+          ACAD_REV=$(printf '%s' "$SRC" | sed -E 's|.*#([0-9a-f]{40}).*|\1|')
+          [ ${#ACAD_REV} -eq 40 ] || { echo "could not parse an acadrust rev from: $SRC"; exit 1; }
+
+          # The API handshake: the host accepts plugins declaring an
+          # api_version between MIN_SUPPORTED and API_VERSION inclusive.
+          MANIFEST=$(gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=$TAG" --jq .content | base64 -d)
+          API=$(printf '%s' "$MANIFEST" | sed -nE 's/.*const API_VERSION: u32 = ([0-9]+).*/\1/p')
+          MIN=$(printf '%s' "$MANIFEST" | sed -nE 's/.*API_VERSION_MIN_SUPPORTED: u32 = ([0-9]+).*/\1/p')
+
+          {
+            echo "tag=$TAG"; echo "sha=$SHA"
+            echo "acad_url=$ACAD_URL"; echo "acad_rev=$ACAD_REV"
+            echo "api=$API"; echo "min=$MIN"
+          } >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nsha=%s\nacadrust=%s @ %s\napi=%s min=%s\n' \
+            "$TAG" "$SHA" "$ACAD_URL" "$ACAD_REV" "$API" "$MIN"
+
+      - name: Check the declared api_version is still accepted
+        env:
+          API: ${{ steps.pins.outputs.api }}
+          MIN: ${{ steps.pins.outputs.min }}
+          TAG: ${{ steps.pins.outputs.tag }}
+        run: |
+          set -euo pipefail
+          DECLARED=$(sed -nE 's/^api_version *= *([0-9]+).*/\1/p' plugin.toml | head -1)
+          echo "plugin declares api_version=$DECLARED; host $TAG accepts $MIN..$API"
+          if [ "$DECLARED" -lt "$MIN" ] || [ "$DECLARED" -gt "$API" ]; then
+            echo "::error::plugin.toml api_version=$DECLARED is outside the host's accepted range $MIN..$API at $TAG — this needs a human: the contract changed, not just the pins."
+            exit 1
+          fi
+
+      - name: Apply the pins
+        id: edit
+        env:
+          TAG: ${{ steps.pins.outputs.tag }}
+          SHA: ${{ steps.pins.outputs.sha }}
+          ACAD_URL: ${{ steps.pins.outputs.acad_url }}
+          ACAD_REV: ${{ steps.pins.outputs.acad_rev }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, sys
+
+          tag, sha = os.environ["TAG"], os.environ["SHA"]
+          url, rev = os.environ["ACAD_URL"], os.environ["ACAD_REV"]
+
+          cargo = open("Cargo.toml").read()
+          orig = cargo
+
+          # Host contract crate: rev + the comment naming the release.
+          cargo = re.sub(r'(ocs_plugin_api = \{ git = "[^"]+", rev = ")[0-9a-f]{40}(")',
+                         rf'\g<1>{sha}\g<2>', cargo)
+          cargo = re.sub(r'# Pinned to the v[\d.]+ RELEASE TAG commit',
+                         f'# Pinned to the {tag} RELEASE TAG commit', cargo)
+
+          # acadrust patch: url + rev (the source repo has moved once already).
+          cargo = re.sub(r'(\[patch\.crates-io\]\nacadrust = \{ git = ")[^"]+(", rev = ")[0-9a-f]{40}(")',
+                         rf'\g<1>{url}\g<2>{rev}\g<3>', cargo)
+          cargo = re.sub(r"# Match the v[\d.]+ release's acadrust EXACTLY",
+                         f"# Match the {tag} release's acadrust EXACTLY", cargo)
+
+          if sha not in cargo or rev not in cargo:
+              sys.exit("Cargo.toml did not take both pins — the manifest shape "
+                       "changed and the regexes need updating.")
+
+          # Decide BEFORE bumping the version: the bump always changes the
+          # file, so comparing after it would report "changed" on every run
+          # and open a no-op PR each day.
+          changed = cargo != orig
+          out = open(os.environ["GITHUB_OUTPUT"], "a")
+          if not changed:
+              out.write("changed=false\n")
+              print("pins already current — leaving the tree untouched")
+              sys.exit(0)
+
+          # Version bump: patch+1, applied to both manifests in lockstep.
+          m = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', cargo, re.M)
+          major, minor, patch = (int(x) for x in m.groups())
+          newver = f"{major}.{minor}.{patch + 1}"
+          cargo = re.sub(r'^version = "[\d.]+"', f'version = "{newver}"', cargo, count=1, flags=re.M)
+          open("Cargo.toml", "w").write(cargo)
+
+          plug = open("plugin.toml").read()
+          plug = re.sub(r'^version = "[\d.]+"', f'version = "{newver}"', plug, count=1, flags=re.M)
+          open("plugin.toml", "w").write(plug)
+
+          out.write(f"newver={newver}\nchanged=true\n")
+          print(f"version -> {newver}")
+          PY
+
+      - name: Nothing to do
+        if: steps.edit.outputs.changed == 'false'
+        run: |
+          echo "Pins already match host ${{ steps.pins.outputs.tag }} — no PR needed." \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Install Rust
+        if: steps.edit.outputs.changed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build and test against the new pins
+        if: steps.edit.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          cargo build --release
+          cargo test --workspace
+
+      - name: Open or refresh the repin PR
+        if: steps.edit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pins.outputs.tag }}
+          SHA: ${{ steps.pins.outputs.sha }}
+          ACAD_URL: ${{ steps.pins.outputs.acad_url }}
+          ACAD_REV: ${{ steps.pins.outputs.acad_rev }}
+          API: ${{ steps.pins.outputs.api }}
+          MIN: ${{ steps.pins.outputs.min }}
+          NEWVER: ${{ steps.edit.outputs.newver }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add Cargo.toml plugin.toml
+          git commit -m "release: v$NEWVER — re-pin to host $TAG (acadrust ${ACAD_REV:0:7})
+
+          - TAG: $TAG
+          - HOST_SHA: $SHA
+          - ACADRUST: $ACAD_REV ($ACAD_URL)
+          - NEWVER: $NEWVER
+
+          Opened automatically by .github/workflows/repin-host.yml."
+          # Force: the branch is a proposal regenerated from scratch each run,
+          # never something a human commits onto.
+          git push --force origin "$BRANCH"
+
+          cat > body.md <<EOF
+          Re-pin to host **$TAG**. Opened automatically; the branch is regenerated
+          from \`${{ github.event.repository.default_branch }}\` on every run, so if a newer host release lands
+          before this merges it will be rewritten in place rather than going stale.
+
+          - TAG: $TAG
+          - HOST_SHA: \`$SHA\`
+          - ACADRUST: \`$ACAD_REV\` ($ACAD_URL)
+          - NEWVER: $NEWVER
+
+          API handshake: plugin declares \`api_version\` within the host's accepted range $MIN..$API.
+
+          Verified in CI: \`cargo build --release\` and \`cargo test --workspace\` green against these pins.
+
+          Not covered: loading the built cdylib into a real host. Plugin discovery
+          runs in the GUI update loop, so \`--serve\` can't exercise it headlessly —
+          if the ABI is going to bite, it bites at load time, not here. Worth a
+          manual smoke against the $TAG host before releasing.
+          EOF
+
+          if gh pr view "$BRANCH" --json number >/dev/null 2>&1; then
+            gh pr edit "$BRANCH" \
+              --title "release: v$NEWVER — re-pin to host $TAG (acadrust ${ACAD_REV:0:7})" \
+              --body-file body.md
+            echo "refreshed existing PR"
+          else
+            gh pr create --head "$BRANCH" \
+              --title "release: v$NEWVER — re-pin to host $TAG (acadrust ${ACAD_REV:0:7})" \
+              --body-file body.md
+          fi
