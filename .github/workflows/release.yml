@@ -1,12 +1,26 @@
 name: release
 
 # Build the plugin cdylib for each desktop platform and attach the binaries
-# (plus plugin.toml) to a GitHub Release when a v* tag is pushed. Open CAD
-# Studio's Plugin Manager reads the release assets, picks the one matching the
-# user's OS/arch, and installs it.
+# (plus plugin.toml) to a GitHub Release. Open CAD Studio's Plugin Manager reads
+# the release assets, picks the one matching the user's OS/arch, and installs it.
+#
+# Two entry points:
+#
+#   push (v* tag)  — a human tagged by hand.
+#   workflow_call  — repin.yml cutting an automated release. This exists because
+#                    GitHub does not start workflows from events created with
+#                    the default GITHUB_TOKEN: a tag the bot pushes would never
+#                    fire the `push` trigger above, so the bot calls this
+#                    workflow directly instead of relying on the tag event.
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. v0.4.6). Must already exist."
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -27,8 +41,15 @@ jobs:
             ext: dylib
             asset: opencad.landsurvey-macos-aarch64.dylib
     runs-on: ${{ matrix.os }}
+    env:
+      # `inputs` is unset on the push path, so this resolves to the pushed tag.
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Build the tagged commit, not whatever the default branch points at
+          # by the time a called run starts.
+          ref: ${{ inputs.tag || github.ref_name }}
       # Floating `stable` on purpose: ABI compatibility with the host wants the
       # same toolchain, and OpenCADStudio's own release workflow builds on
       # `stable` too. Pinning a fixed rustc here would drift away from the host
@@ -43,7 +64,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           cargo_ver=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           plugin_ver=$(grep -m1 '^version = ' plugin.toml | cut -d'"' -f2)
           echo "tag=$tag  Cargo.toml=$cargo_ver  plugin.toml=$plugin_ver"
@@ -73,6 +94,8 @@ jobs:
           cp plugin.toml dist/plugin.toml
       - uses: softprops/action-gh-release@v3
         with:
+          # Explicit: on the workflow_call path there is no tag ref to infer.
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             dist/${{ matrix.asset }}
             dist/plugin.toml
