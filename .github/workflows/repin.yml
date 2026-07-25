@@ -83,26 +83,68 @@ jobs:
       - name: Derive new pins from the upstream tag
         id: pins
         run: |
-          # acadrust rev = whatever the host release locked (its Cargo.lock).
+          # The acadrust pin comes from the host release's own Cargo.lock. Take
+          # the whole `source =` line, not just the rev: upstream has moved the
+          # crate between repositories once already (HakanSeven12/acadrust ->
+          # OpenAEC-Foundation/acadifc, which then 404'd the old URL), and a
+          # rev-only rewrite pins a commit that does not exist at the old URL.
           gh api "repos/$UPSTREAM/contents/Cargo.lock?ref=$TAG" \
             -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.lock
-          ACADRUST=$(python3 - <<'EOF'
+          eval "$(python3 - <<'EOF'
+          import re
+
           lines = open("/tmp/host-Cargo.lock").read().splitlines()
+          src = None
           for i, l in enumerate(lines):
               if l.strip() == 'name = "acadrust"':
-                  for m in lines[i : i + 4]:
-                      if m.startswith("source") and "#" in m:
-                          print(m.split("#")[1].rstrip('"'))
-                          raise SystemExit
-          raise SystemExit("acadrust source rev not found in host Cargo.lock")
+                  for m in lines[i : i + 5]:
+                      if m.startswith("source"):
+                          src = m.split("=", 1)[1].strip().strip('"')
+                          break
+                  break
+          if not src:
+              raise SystemExit("acadrust source not found in host Cargo.lock")
+          # git+https://host/owner/repo?branch=main#<40-hex>
+          m = re.fullmatch(r"git\+(?P<url>[^?#]+)(\?[^#]*)?#(?P<rev>[0-9a-f]{40})", src)
+          if not m:
+              raise SystemExit(f"unparseable acadrust source: {src}")
+          print(f'ACADRUST_URL={m.group("url")}')
+          print(f'ACADRUST_REV={m.group("rev")}')
           EOF
+          )"
+
+          # Same for the pin we currently carry — parsed generically so a URL
+          # change is detected rather than silently preserved.
+          eval "$(python3 - <<'EOF'
+          import re
+
+          cargo = open("Cargo.toml").read()
+          m = re.search(
+              r'^acadrust = \{ git = "(?P<url>[^"]+)", rev = "(?P<rev>[0-9a-f]{40})" \}',
+              cargo, re.M,
           )
-          OLD_ACADRUST=$(grep -oP 'acadrust", rev = "\K[0-9a-f]{40}' Cargo.toml)
-          echo "acadrust=$ACADRUST" >> "$GITHUB_OUTPUT"
-          echo "old_acadrust=$OLD_ACADRUST" >> "$GITHUB_OUTPUT"
-          echo "acadrust: $OLD_ACADRUST -> $ACADRUST"
+          if not m:
+              raise SystemExit("could not parse the current acadrust patch in Cargo.toml")
+          print(f'OLD_ACADRUST_URL={m.group("url")}')
+          print(f'OLD_ACADRUST_REV={m.group("rev")}')
+          EOF
+          )"
+
+          {
+            echo "acadrust_url=$ACADRUST_URL"
+            echo "acadrust_rev=$ACADRUST_REV"
+            echo "old_acadrust_url=$OLD_ACADRUST_URL"
+            echo "old_acadrust_rev=$OLD_ACADRUST_REV"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "acadrust: $OLD_ACADRUST_URL@${OLD_ACADRUST_REV:0:7}"
+          echo "       -> $ACADRUST_URL@${ACADRUST_REV:0:7}"
+          if [ "$ACADRUST_URL" != "$OLD_ACADRUST_URL" ]; then
+            echo "::notice::acadrust moved repositories: $OLD_ACADRUST_URL -> $ACADRUST_URL"
+          fi
 
       - name: Gate on the plugin API version handshake
+        id: apiver
         run: |
           gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=$TAG" \
             -H "Accept: application/vnd.github.raw" > /tmp/manifest.rs
@@ -114,20 +156,48 @@ jobs:
             echo "::error::Host $TAG no longer accepts api_version=$OURS — a source migration is needed, not a re-pin."
             exit 1
           fi
+          # Acceptance is not enough. We link ocs_plugin_api and register with
+          # `ApiVersion::CURRENT`, so the cdylib reports the host's API_VERSION
+          # from `ocs_plugin_api_version()` no matter what plugin.toml claims.
+          # Declaring the old number still *loads* (the host accepts down to
+          # API_VERSION_MIN_SUPPORTED), which is exactly why api_version sat at
+          # 2 across three host releases without anyone noticing. Track MAX so
+          # the manifest describes the binary we actually ship.
+          echo "api_version=$MAX" >> "$GITHUB_OUTPUT"
+          if [ "$OURS" != "$MAX" ]; then
+            echo "::notice::api_version $OURS -> $MAX (host $TAG exports API_VERSION=$MAX)"
+          fi
 
       - name: Rewrite pins and bump the patch version
         id: bump
         env:
-          ACADRUST: ${{ steps.pins.outputs.acadrust }}
+          ACADRUST_URL: ${{ steps.pins.outputs.acadrust_url }}
+          ACADRUST_REV: ${{ steps.pins.outputs.acadrust_rev }}
+          API_VERSION: ${{ steps.apiver.outputs.api_version }}
         run: |
           NEWVER=$(python3 - <<'EOF'
           import os, re
 
-          tag, host_sha, acadrust = os.environ["TAG"], os.environ["HOST_SHA"], os.environ["ACADRUST"]
+          tag, host_sha = os.environ["TAG"], os.environ["HOST_SHA"]
+          acad_url, acad_rev = os.environ["ACADRUST_URL"], os.environ["ACADRUST_REV"]
+          api_version = os.environ["API_VERSION"]
 
           cargo = open("Cargo.toml").read()
-          cargo = re.sub(r'(OpenCADStudio", rev = ")[0-9a-f]{40}', r"\g<1>" + host_sha, cargo)
-          cargo = re.sub(r'(acadrust", rev = ")[0-9a-f]{40}', r"\g<1>" + acadrust, cargo)
+          cargo, n = re.subn(
+              r'(OpenCADStudio", rev = ")[0-9a-f]{40}', r"\g<1>" + host_sha, cargo
+          )
+          if n != 1:
+              raise SystemExit(f"expected 1 ocs_plugin_api rev to rewrite, rewrote {n}")
+
+          # Replace the whole patch entry so a repository move is carried too.
+          cargo, n = re.subn(
+              r'^acadrust = \{ git = "[^"]+", rev = "[0-9a-f]{40}" \}',
+              f'acadrust = {{ git = "{acad_url}", rev = "{acad_rev}" }}',
+              cargo, flags=re.M,
+          )
+          if n != 1:
+              raise SystemExit(f"expected 1 acadrust patch to rewrite, rewrote {n}")
+
           # Keep the pin comments honest: they name the release the revs came from.
           cargo = re.sub(r"Pinned to the v[\d.]+ RELEASE TAG commit", f"Pinned to the {tag} RELEASE TAG commit", cargo)
           cargo = re.sub(r"Match the v[\d.]+ release's acadrust", f"Match the {tag} release's acadrust", cargo)
@@ -139,6 +209,7 @@ jobs:
 
           plug = open("plugin.toml").read()
           plug = re.sub(r'^version = "[\d.]+"', f'version = "{new}"', plug, count=1, flags=re.M)
+          plug = re.sub(r"^api_version = \d+", f"api_version = {api_version}", plug, count=1, flags=re.M)
           open("plugin.toml", "w").write(plug)
           print(new)
           EOF
@@ -148,8 +219,12 @@ jobs:
 
       - name: Build and test the plugin against the new pins
         run: |
-          cargo build --release
-          cargo test --workspace
+          # Refresh the committed lockfile for the new pins, then build from it.
+          # release.yml builds `--locked`, so a PR that bumps Cargo.toml without
+          # the matching Cargo.lock would pass here and fail at release time.
+          cargo generate-lockfile
+          cargo build --release --locked
+          cargo test --workspace --locked
 
       - name: Build the host at the release tag
         run: |
@@ -195,19 +270,36 @@ jobs:
 
       - name: Open the re-pin PR
         env:
-          ACADRUST: ${{ steps.pins.outputs.acadrust }}
-          OLD_ACADRUST: ${{ steps.pins.outputs.old_acadrust }}
+          ACADRUST_URL: ${{ steps.pins.outputs.acadrust_url }}
+          ACADRUST_REV: ${{ steps.pins.outputs.acadrust_rev }}
+          OLD_ACADRUST_URL: ${{ steps.pins.outputs.old_acadrust_url }}
+          OLD_ACADRUST_REV: ${{ steps.pins.outputs.old_acadrust_rev }}
           NEWVER: ${{ steps.bump.outputs.newver }}
+          API_VERSION: ${{ steps.apiver.outputs.api_version }}
         run: |
-          ACAD_SHORT=${ACADRUST:0:7}
-          # What moved in acadrust between the pins, for the PR body.
-          ACAD_LOG=$(gh api "repos/HakanSeven12/acadrust/compare/$OLD_ACADRUST...$ACADRUST" \
-            --jq '[.commits[].commit.message | split("\n")[0] | "- " + .] | join("\n")' || echo "- (compare unavailable)")
+          ACAD_SHORT=${ACADRUST_REV:0:7}
+
+          # What moved in acadrust between the pins, for the PR body. Only
+          # meaningful when both revs live in the same repository — across a
+          # move there is no common history to compare, and the old repo may be
+          # gone entirely (HakanSeven12/acadrust now 404s).
+          if [ "$ACADRUST_URL" = "$OLD_ACADRUST_URL" ]; then
+            ACAD_SLUG=$(echo "$ACADRUST_URL" | sed -E 's#^https://github\.com/##; s#\.git$##')
+            ACAD_LOG=$(gh api "repos/$ACAD_SLUG/compare/$OLD_ACADRUST_REV...$ACADRUST_REV" \
+              --jq '[.commits[].commit.message | split("\n")[0] | "- " + .] | join("\n")' \
+              || echo "- (compare unavailable)")
+          else
+            ACAD_LOG="- acadrust MOVED repositories: \`$OLD_ACADRUST_URL\` -> \`$ACADRUST_URL\`
+          - No commit range spans the move; review the new source directly."
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -b "repin/$TAG"
+          # -f because Cargo.lock was gitignored historically; the release build
+          # runs --locked, so the lockfile has to travel with the pin bump.
           git add Cargo.toml plugin.toml
+          git add -f Cargo.lock
           git commit -m "release: v$NEWVER — re-pin to host $TAG (acadrust $ACAD_SHORT)" \
             -m "Mechanical pin bump per the rebuild rule, opened by the repin
           workflow. Tests and the headless host end-to-end check ran green in
@@ -221,9 +313,11 @@ jobs:
           | pin | old | new |
           |---|---|---|
           | \`ocs_plugin_api\` | (previous) | \`$HOST_SHA\` ($TAG) |
-          | \`acadrust\` | \`$OLD_ACADRUST\` | \`$ACADRUST\` |
+          | \`acadrust\` repo | \`$OLD_ACADRUST_URL\` | \`$ACADRUST_URL\` |
+          | \`acadrust\` rev | \`$OLD_ACADRUST_REV\` | \`$ACADRUST_REV\` |
+          | \`api_version\` | (previous) | \`$API_VERSION\` |
 
-          **Checks run in this workflow:** api-version gate, \`cargo test --workspace\`,
+          **Checks run in this workflow:** api-version gate, \`cargo test --workspace --locked\`,
           and the headless end-to-end check (host built at \`$TAG\` loads the plugin,
           \`LS_PNEZD\` imports 3 points + labels onto \`LS-PT-*\` layers, \`LS_INVERSE draw\`
           draws the labeled line).
