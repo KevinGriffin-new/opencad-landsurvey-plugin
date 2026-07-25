@@ -4,11 +4,21 @@ name: repin
 # release tag appears (ABI approach B: the plugin must be built against the
 # same ocs_plugin_api commit and acadrust rev as the shipped host).
 #
-# The bot only opens a PR — merging and pushing the v* tag (which cuts the
-# actual plugin release via release.yml) stay with a human. A failure of the
-# api-version gate, the test suite, or the end-to-end host check means the
-# mechanical path is not enough and a source change is needed; the workflow
-# fails loudly so that shows up as a red run instead of a broken PR.
+# Upstream releases land overnight in this timezone, so a purely mechanical
+# re-pin ships itself: when every gate below is green the bot merges its own PR,
+# tags, and calls release.yml. A human is escalated to ONLY when the mechanical
+# path is not enough — that is what the gates are for:
+#
+#   - the host no longer accepts our api_version   (source migration needed)
+#   - the acadrust semver requirement moved         (0.4 -> 0.5 is a decision)
+#   - the plugin no longer compiles                 (contract/trait change)
+#   - the test suite fails
+#   - the end-to-end check fails                    (built host won't load us)
+#   - the diff is not purely mechanical             (someone added source)
+#
+# Any of those stops the release, leaves the PR open, and opens a GitHub issue.
+# Nine consecutive nightly failures once went unnoticed as red runs alone, so
+# escalation is a durable artifact, not a status colour.
 on:
   schedule:
     - cron: "17 6 * * *"
@@ -17,6 +27,10 @@ on:
       tag:
         description: "Upstream tag to re-pin to (default: latest release)"
         required: false
+      dry_run:
+        description: "Run every gate but stop before merge/tag/release"
+        type: boolean
+        default: false
 
 concurrency:
   group: repin
@@ -38,6 +52,7 @@ jobs:
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           TAG="${{ inputs.tag }}"
           if [ -z "$TAG" ]; then
@@ -47,12 +62,19 @@ jobs:
           SHA=$(gh api "repos/$UPSTREAM/commits/$TAG" --jq .sha)
           CURRENT=$(grep -oP 'OpenCADStudio", rev = "\K[0-9a-f]{40}' Cargo.toml)
           echo "upstream $TAG = $SHA ; pinned = $CURRENT"
-          if [ "$SHA" = "$CURRENT" ]; then
+          if [ "$SHA" = "$CURRENT" ] && [ "$DRY_RUN" != "true" ]; then
             echo "Pin is current — nothing to do."
             echo "repin=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if git ls-remote --exit-code origin "refs/heads/repin/$TAG" >/dev/null 2>&1; then
+          if [ "$SHA" = "$CURRENT" ]; then
+            # dry_run against the tag we already ship: the rewrite is a no-op but
+            # build / test / end-to-end still exercise the whole gate. This is how
+            # the automation gets validated without waiting for an upstream release.
+            echo "::notice::dry run against the current pin — gates will run, nothing will ship."
+          fi
+          if [ "$DRY_RUN" != "true" ] \
+             && git ls-remote --exit-code origin "refs/heads/repin/$TAG" >/dev/null 2>&1; then
             echo "Branch repin/$TAG already exists — PR pending or handled."
             echo "repin=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -69,6 +91,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+    outputs:
+      release_tag: ${{ steps.ship.outputs.release_tag }}
     env:
       TAG: ${{ needs.detect.outputs.tag }}
       HOST_SHA: ${{ needs.detect.outputs.host_sha }}
@@ -141,6 +165,29 @@ jobs:
           echo "       -> $ACADRUST_URL@${ACADRUST_REV:0:7}"
           if [ "$ACADRUST_URL" != "$OLD_ACADRUST_URL" ]; then
             echo "::notice::acadrust moved repositories: $OLD_ACADRUST_URL -> $ACADRUST_URL"
+          fi
+
+      # A repo move is mechanical; a semver-requirement move is not. `[patch]`
+      # only redirects where a version comes from — it cannot satisfy a
+      # requirement the manifest does not already allow. If the host moves to
+      # acadrust 0.5 while we require "0.4", cargo rejects the patch outright,
+      # and choosing the new requirement (plus whatever API churn rides along)
+      # is a source decision, not a pin bump.
+      - name: Gate on the acadrust version requirement
+        id: acadver
+        run: |
+          gh api "repos/$UPSTREAM/contents/Cargo.toml?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.toml
+          HOST_REQ=$(grep -oP '^acadrust = "\K[^"]+' /tmp/host-Cargo.toml || true)
+          OURS_REQ=$(grep -oP '^acadrust = "\K[^"]+' Cargo.toml || true)
+          echo "host requires acadrust \"$HOST_REQ\"; we require \"$OURS_REQ\""
+          if [ -z "$HOST_REQ" ] || [ -z "$OURS_REQ" ]; then
+            echo "::error::could not read the acadrust requirement from one of the manifests"
+            exit 1
+          fi
+          if [ "$HOST_REQ" != "$OURS_REQ" ]; then
+            echo "::error::acadrust requirement moved \"$OURS_REQ\" -> \"$HOST_REQ\" in host $TAG. A [patch] cannot cross a semver bump — this needs a source change, not a re-pin."
+            exit 1
           fi
 
       - name: Gate on the plugin API version handshake
@@ -217,6 +264,20 @@ jobs:
           echo "newver=$NEWVER" >> "$GITHUB_OUTPUT"
           git diff
 
+      # An automated release may only carry a mechanical re-pin. If anything
+      # outside the three manifests changed, the diff is no longer something
+      # this workflow's gates can vouch for, so it stops and asks for a human.
+      - name: Gate on the diff being purely mechanical
+        run: |
+          CHANGED=$(git diff --name-only | sort | tr '\n' ' ')
+          echo "changed: $CHANGED"
+          UNEXPECTED=$(git diff --name-only \
+            | grep -vE '^(Cargo\.toml|plugin\.toml|Cargo\.lock)$' || true)
+          if [ -n "$UNEXPECTED" ]; then
+            echo "::error::re-pin touched files beyond the manifests: $UNEXPECTED"
+            exit 1
+          fi
+
       - name: Build and test the plugin against the new pins
         run: |
           # Refresh the committed lockfile for the new pins, then build from it.
@@ -268,7 +329,16 @@ jobs:
           print("end-to-end OK: plugin loaded, LS_PNEZD and LS_INVERSE dispatched")
           EOF
 
+      - name: Stop here on a dry run
+        if: inputs.dry_run
+        run: |
+          echo "::notice::dry run: every gate passed. Nothing merged, tagged or released."
+          echo "### Dry run — all gates green" >> "$GITHUB_STEP_SUMMARY"
+          echo "Nothing was merged, tagged or published." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Open the re-pin PR
+        if: ${{ !inputs.dry_run }}
+        id: pr
         env:
           ACADRUST_URL: ${{ steps.pins.outputs.acadrust_url }}
           ACADRUST_REV: ${{ steps.pins.outputs.acadrust_rev }}
@@ -325,7 +395,91 @@ jobs:
           **acadrust changes between the pins:**
           $ACAD_LOG
 
-          **After merging**, cut the release:
-          \`\`\`
-          git tag v$NEWVER && git push origin v$NEWVER
-          \`\`\`"
+          Every gate passed, so this PR is merged and released automatically by
+          the run that opened it. It stays here as the audit trail and the thing
+          to revert if the release turns out bad."
+
+      # Every gate is green and the diff is mechanical, so ship it. A human is
+      # not in this path by design: upstream releases land overnight in this
+      # timezone, and waiting for a morning merge is the whole problem. The PR
+      # above remains the audit trail and the revert point.
+      - name: Merge and tag
+        if: ${{ !inputs.dry_run }}
+        id: ship
+        env:
+          NEWVER: ${{ steps.bump.outputs.newver }}
+        run: |
+          set -euo pipefail
+          gh pr merge "repin/$TAG" --merge --delete-branch
+
+          # Tag the merge commit on main, not the branch head.
+          git fetch origin main
+          MERGE_SHA=$(git rev-parse origin/main)
+          git tag "v$NEWVER" "$MERGE_SHA"
+          git push origin "v$NEWVER"
+          echo "tagged v$NEWVER at $MERGE_SHA"
+          echo "release_tag=v$NEWVER" >> "$GITHUB_OUTPUT"
+
+  # Build and publish the release. Invoked directly rather than by the tag push
+  # above, because GitHub does not start workflows from events created with the
+  # default GITHUB_TOKEN — the bot's `git push origin v*` fires nothing.
+  release:
+    needs: repin
+    if: needs.repin.outputs.release_tag != ''
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    with:
+      tag: ${{ needs.repin.outputs.release_tag }}
+
+  # Escalation. A gate stopped the mechanical path, so a human has to decide
+  # something. A red run alone is not enough — nine consecutive nightly failures
+  # once went unnoticed — so leave a durable, self-explaining artifact.
+  escalate:
+    needs: [detect, repin]
+    if: failure() && needs.detect.outputs.repin == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      TAG: ${{ needs.detect.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Open or update the escalation issue
+        run: |
+          set -euo pipefail
+          TITLE="repin blocked: host $TAG needs a human"
+
+          BODY=$(cat <<EOF
+          The automated re-pin to upstream \`$TAG\` did not pass its gates, so
+          nothing was merged, tagged or released.
+
+          **Run:** $RUN_URL
+
+          The bot ships a re-pin on its own only while the change stays
+          mechanical. One of these stopped it:
+
+          - the host no longer accepts our \`api_version\` (source migration)
+          - the \`acadrust\` semver requirement moved (e.g. 0.4 -> 0.5)
+          - the plugin no longer compiles against the new contract
+          - \`cargo test --workspace --locked\` failed
+          - the end-to-end check failed (host at \`$TAG\` would not load us)
+          - the diff reached beyond \`Cargo.toml\` / \`plugin.toml\` / \`Cargo.lock\`
+
+          Open the run log above; the failing step names which one and why.
+
+          This issue is updated, not duplicated, on repeated failures for the
+          same upstream tag. Close it once the re-pin lands.
+          EOF
+          )
+
+          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --body "Still blocked as of $RUN_URL"
+            echo "commented on #$EXISTING"
+          else
+            gh issue create --title "$TITLE" --body "$BODY"
+          fi
