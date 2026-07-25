@@ -1,6 +1,6 @@
 [package]
 name = "opencad-landsurvey-plugin"
-version = "0.4.5"
+version = "0.4.6"
 edition = "2021"
 description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
 license = "GPL-3.0-only"
@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
-# Pinned to the v0.8.2 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "4bcf5063e9ab722a3d196cdfbd07d9ed16dbd451", features = ["host"] }
+# Pinned to the v0.8.7 RELEASE TAG commit (the MSI host) so contract types match.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "ec92a0cdc603ae0388af4eb30224a400c3d1a63d", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
 # records, so it names `acadrust` types directly. Must resolve to the *same*
@@ -23,11 +23,19 @@ acadrust = "0.4"
 # Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
 landsurvey = { path = "crates/landsurvey" }
 
-# Match the v0.8.2 release's acadrust EXACTLY (from its Cargo.lock) so the
+# Match the v0.8.7 release's acadrust EXACTLY (from its Cargo.lock) so the
 # loaded library is binary-compatible with the MSI host. (acadrust MAJOR bump
 # 0.3.4 -> 0.4 landed between host 0.6.6 and 0.7.2.)
+#
+# The crate MOVED between host v0.8.2 and v0.8.7: HakanSeven12/acadrust ->
+# OpenAEC-Foundation/acadifc (still the `acadrust` package). Upstream tracks the
+# fork by `branch = "main"`; we pin the rev their v0.8.7 lockfile resolved to,
+# because a branch pin drifts between rebuilds and would silently ship a cdylib
+# whose acadrust types no longer match the host's.
+# When re-pinning to a newer host, read the rev out of THAT tag's Cargo.lock —
+# never take whatever `main` happens to be at the time.
 [patch.crates-io]
-acadrust = { git = "https://github.com/HakanSeven12/acadrust", rev = "d1e198b66db8a460915d7ebcdb293e912d7bf964" }
+acadrust = { git = "https://github.com/OpenAEC-Foundation/acadifc", rev = "022290a3a2a548c54c8fdf580ef5e44de36b4520" }
 
 [workspace]
 members = ["crates/landsurvey", "crates/landsurvey-cli"]

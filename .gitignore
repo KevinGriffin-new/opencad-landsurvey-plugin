@@ -1,5 +1,9 @@
 /target
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock IS committed. The usual "libraries don't commit a lockfile" advice
+# does not apply: this crate ships a cdylib that has to be binary-compatible
+# with a specific host build, and the pinned git revs only fix `ocs_plugin_api`
+# and `acadrust` — every transitive crates.io dep would otherwise re-resolve on
+# each CI run and land a different ahash/nalgebra/rkyv inside the released .dll.
 # internal working draft for issue #157 — not for the public repo
 docs/landxml-import-proposal.md

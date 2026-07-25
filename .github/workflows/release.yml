@@ -29,8 +29,40 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+      # Floating `stable` on purpose: ABI compatibility with the host wants the
+      # same toolchain, and OpenCADStudio's own release workflow builds on
+      # `stable` too. Pinning a fixed rustc here would drift away from the host
+      # over time rather than towards it. The version is echoed in the build
+      # step so a failed load can be traced back to the exact compiler.
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release
+
+      # A release whose tag disagrees with the manifests ships a plugin that
+      # reports the wrong version to the Plugin Manager. Catch it before the
+      # assets are built.
+      - name: Check tag matches the declared plugin version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          cargo_ver=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          plugin_ver=$(grep -m1 '^version = ' plugin.toml | cut -d'"' -f2)
+          echo "tag=$tag  Cargo.toml=$cargo_ver  plugin.toml=$plugin_ver"
+          if [ "$tag" != "$cargo_ver" ] || [ "$tag" != "$plugin_ver" ]; then
+            echo "::error::tag v$tag disagrees with Cargo.toml ($cargo_ver) / plugin.toml ($plugin_ver)"
+            exit 1
+          fi
+
+      # `--locked` builds the release from the committed Cargo.lock. Without it
+      # each runner re-resolves the dependency graph, so the three platform
+      # binaries can be built against different transitive versions than each
+      # other and than whatever was tested — and this cdylib shares acadrust
+      # types with the host across the plugin boundary.
+      - name: Build
+        shell: bash
+        run: |
+          rustc --version
+          cargo build --release --locked
+
       - name: Stage release asset
         shell: bash
         run: |
