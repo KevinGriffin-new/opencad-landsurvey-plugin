@@ -154,17 +154,26 @@ jobs:
           EOF
           )"
 
+          # Compare owner/repo, not the literal URL: host v0.8.8 respelled the
+          # same source as `.../acadifc.git`, and a literal comparison reads a
+          # bare `.git` suffix as a repository move.
+          slug() { echo "$1" | sed -E 's#^[a-z+]+://##; s#\.git$##'; }
+          ACADRUST_SLUG=$(slug "$ACADRUST_URL")
+          OLD_ACADRUST_SLUG=$(slug "$OLD_ACADRUST_URL")
+
           {
             echo "acadrust_url=$ACADRUST_URL"
             echo "acadrust_rev=$ACADRUST_REV"
+            echo "acadrust_slug=$ACADRUST_SLUG"
             echo "old_acadrust_url=$OLD_ACADRUST_URL"
             echo "old_acadrust_rev=$OLD_ACADRUST_REV"
+            echo "old_acadrust_slug=$OLD_ACADRUST_SLUG"
           } >> "$GITHUB_OUTPUT"
 
           echo "acadrust: $OLD_ACADRUST_URL@${OLD_ACADRUST_REV:0:7}"
           echo "       -> $ACADRUST_URL@${ACADRUST_REV:0:7}"
-          if [ "$ACADRUST_URL" != "$OLD_ACADRUST_URL" ]; then
-            echo "::notice::acadrust moved repositories: $OLD_ACADRUST_URL -> $ACADRUST_URL"
+          if [ "$ACADRUST_SLUG" != "$OLD_ACADRUST_SLUG" ]; then
+            echo "::notice::acadrust moved repositories: $OLD_ACADRUST_SLUG -> $ACADRUST_SLUG"
           fi
 
       # A repo move is mechanical; a semver-requirement move is not. `[patch]`
@@ -178,17 +187,39 @@ jobs:
         run: |
           gh api "repos/$UPSTREAM/contents/Cargo.toml?ref=$TAG" \
             -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.toml
-          HOST_REQ=$(grep -oP '^acadrust = "\K[^"]+' /tmp/host-Cargo.toml || true)
-          OURS_REQ=$(grep -oP '^acadrust = "\K[^"]+' Cargo.toml || true)
-          echo "host requires acadrust \"$HOST_REQ\"; we require \"$OURS_REQ\""
-          if [ -z "$HOST_REQ" ] || [ -z "$OURS_REQ" ]; then
-            echo "::error::could not read the acadrust requirement from one of the manifests"
-            exit 1
-          fi
-          if [ "$HOST_REQ" != "$OURS_REQ" ]; then
-            echo "::error::acadrust requirement moved \"$OURS_REQ\" -> \"$HOST_REQ\" in host $TAG. A [patch] cannot cross a semver bump — this needs a source change, not a re-pin."
-            exit 1
-          fi
+          # Parse the manifests as TOML rather than grepping for one spelling.
+          # Host v0.8.8 rewrote `acadrust = "0.4"` as
+          # `acadrust = { version = "0.4", features = ["serde"] }`, which a
+          # line-oriented match read as "no requirement at all" and escalated —
+          # a false positive on a re-pin that was entirely mechanical.
+          python3 - <<'EOF'
+          import tomllib
+
+          def requirement(path):
+              with open(path, "rb") as f:
+                  doc = tomllib.load(f)
+              dep = doc.get("dependencies", {}).get("acadrust")
+              if dep is None:
+                  raise SystemExit(f"::error::no [dependencies].acadrust in {path}")
+              # Accept both `acadrust = "0.4"` and the table form.
+              if isinstance(dep, str):
+                  return dep
+              version = dep.get("version")
+              if version is None:
+                  raise SystemExit(f"::error::[dependencies].acadrust in {path} declares no version")
+              return version
+
+          host = requirement("/tmp/host-Cargo.toml")
+          ours = requirement("Cargo.toml")
+          print(f'host requires acadrust "{host}"; we require "{ours}"')
+          if host != ours:
+              raise SystemExit(
+                  f'::error::acadrust requirement moved "{ours}" -> "{host}". '
+                  "A [patch] only redirects where a version comes from — it cannot "
+                  "satisfy a requirement the manifest does not allow. This needs a "
+                  "source change, not a re-pin."
+              )
+          EOF
 
       - name: Gate on the plugin API version handshake
         id: apiver
@@ -342,8 +373,10 @@ jobs:
         env:
           ACADRUST_URL: ${{ steps.pins.outputs.acadrust_url }}
           ACADRUST_REV: ${{ steps.pins.outputs.acadrust_rev }}
+          ACADRUST_SLUG: ${{ steps.pins.outputs.acadrust_slug }}
           OLD_ACADRUST_URL: ${{ steps.pins.outputs.old_acadrust_url }}
           OLD_ACADRUST_REV: ${{ steps.pins.outputs.old_acadrust_rev }}
+          OLD_ACADRUST_SLUG: ${{ steps.pins.outputs.old_acadrust_slug }}
           NEWVER: ${{ steps.bump.outputs.newver }}
           API_VERSION: ${{ steps.apiver.outputs.api_version }}
         run: |
@@ -353,13 +386,13 @@ jobs:
           # meaningful when both revs live in the same repository — across a
           # move there is no common history to compare, and the old repo may be
           # gone entirely (HakanSeven12/acadrust now 404s).
-          if [ "$ACADRUST_URL" = "$OLD_ACADRUST_URL" ]; then
-            ACAD_SLUG=$(echo "$ACADRUST_URL" | sed -E 's#^https://github\.com/##; s#\.git$##')
-            ACAD_LOG=$(gh api "repos/$ACAD_SLUG/compare/$OLD_ACADRUST_REV...$ACADRUST_REV" \
+          if [ "$ACADRUST_SLUG" = "$OLD_ACADRUST_SLUG" ]; then
+            ACAD_REPO=${ACADRUST_SLUG#github.com/}
+            ACAD_LOG=$(gh api "repos/$ACAD_REPO/compare/$OLD_ACADRUST_REV...$ACADRUST_REV" \
               --jq '[.commits[].commit.message | split("\n")[0] | "- " + .] | join("\n")' \
               || echo "- (compare unavailable)")
           else
-            ACAD_LOG="- acadrust MOVED repositories: \`$OLD_ACADRUST_URL\` -> \`$ACADRUST_URL\`
+            ACAD_LOG="- acadrust MOVED repositories: \`$OLD_ACADRUST_SLUG\` -> \`$ACADRUST_SLUG\`
           - No commit range spans the move; review the new source directly."
           fi
 
@@ -474,12 +507,18 @@ jobs:
           EOF
           )
 
-          EXISTING=$(gh issue list --state open --search "$TITLE in:title" \
+          # --repo on every call: this job deliberately has no checkout (it only
+          # talks to the API), so gh has no git remote to infer the repository
+          # from and otherwise dies with "not a git repository" — which is how a
+          # blocked re-pin once failed to notify anyone at all.
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" \
             --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
 
           if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --body "Still blocked as of $RUN_URL"
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Still blocked as of $RUN_URL"
             echo "commented on #$EXISTING"
           else
-            gh issue create --title "$TITLE" --body "$BODY"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
           fi
