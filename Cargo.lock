@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acadrust"
 version = "0.4.0"
-source = "git+https://github.com/OpenAEC-Foundation/acadifc.git?rev=a7b1e07f6b3884b139684b763a8a86f27705eb70#a7b1e07f6b3884b139684b763a8a86f27705eb70"
+source = "git+https://github.com/OpenAEC-Foundation/acadifc.git?rev=78b57b000d708864d304ec52cf5cd1eba1bb2626#78b57b000d708864d304ec52cf5cd1eba1bb2626"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -313,9 +313,9 @@ dependencies = [
 
 [[package]]
 name = "interprocess"
-version = "2.4.2"
+version = "2.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "069323743400cb7ab06a8fe5c1ed911d36b6919ec531661d034c89083629595b"
+checksum = "798de1433ba514cc6c04c4144c2469af81396e4906195218737c776d47769572"
 dependencies = [
  "doctest-file",
  "libc",
@@ -490,7 +490,7 @@ dependencies = [
 [[package]]
 name = "ocs_plugin_api"
 version = "0.1.0"
-source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=7b708372a8ac1ba5e430f47006c4ceeb6a6dd7ad#7b708372a8ac1ba5e430f47006c4ceeb6a6dd7ad"
+source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=678938ddf7a7131c544cc46116b672be84a698a5#678938ddf7a7131c544cc46116b672be84a698a5"
 dependencies = [
  "acadrust",
  "bincode",
@@ -511,7 +511,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opencad-landsurvey-plugin"
-version = "0.4.9"
+version = "0.4.10"
 dependencies = [
  "acadrust",
  "landsurvey",
