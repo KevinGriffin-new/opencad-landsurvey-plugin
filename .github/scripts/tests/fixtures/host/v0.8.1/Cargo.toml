@@ -1,0 +1,142 @@
+[package]
+name = "OpenCADStudio"
+version = "0.8.1"
+edition = "2021"
+build = "build.rs"
+
+[workspace]
+# `dwg-thumbnailer-win` is a Windows-only COM DLL (`#![cfg(windows)]`): it
+# compiles to an empty cdylib on Linux/macOS and to the real handler on Windows,
+# where the `build-windows` CI job (`cargo build --release`) compiles and thus
+# verifies it.
+members = [
+    "crates/ocs_plugin_api",
+    "crates/dwg-thumbnailer",
+    "crates/dwg-thumbnailer-win",
+]
+
+# Embed the application icon into the Windows .exe so Explorer, the taskbar,
+# the Start-menu tile and file-association entries show it (issue #107).
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[features]
+default = ["solid3d"]
+# 3-D solid modelling: B-rep tessellation (truck-meshalgo) and booleans
+# (truck-shapeops). Disabled for wasm builds — truck-meshalgo pulls
+# vtkio → xz2 → lzma-sys (a C library) that does not cross-compile to
+# wasm32. Without this feature the app is a 2-D CAD editor; the Model tab,
+# solid tessellation and ACIS import become no-ops.
+solid3d = ["dep:truck-meshalgo", "dep:truck-shapeops", "dep:lzma-sys"]
+
+[dependencies]
+# JSON: plugin marketplace / Patreon fetch (native) + web supporters.json parse,
+# and the consolidated user config (settings.json) via serde-derived structs.
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+# Stable, dependency-free add-on contract (manifest + ribbon/CadModule types).
+# Plugin authors target this crate's semver, not OpenCADStudio internals.
+# The `host` feature (out-of-process plugin runtime: interprocess, libloading,
+# memmap2, rkyv) is native-only — see the per-target sections below; the web
+# build gets the dependency-free manifest/ribbon contract.
+# vtkio (pulled in transitively via truck-meshalgo) depends on xz2 → lzma-sys,
+# which by default links the system liblzma dynamically. On macOS that bakes a
+# Homebrew dylib path (/opt/homebrew/.../liblzma.5.dylib) into the binary, so
+# the .app crashes on launch on machines without that exact library (#56).
+# Forcing the `static` feature builds liblzma from the bundled source, making
+# the binary self-contained on every platform.
+lzma-sys = { version = "0.1", features = ["static"], optional = true }
+iced = { version = "0.14", features = ["image", "svg", "advanced", "canvas", "smol"] }
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = { version = "0.33", features = ["bytemuck"] }
+truck-modeling = "0.6"
+truck-meshalgo = { version = "0.4", default-features = false, features = ["tessellation"], optional = true }
+truck-polymesh = "0.6"
+rfd = "0.17"
+# Command-line parsing: file arg, --serve/--export/--script and the headless flags.
+clap = { version = "4", features = ["derive"] }
+# Opt-in logging via --log / RUST_LOG (surfaces wgpu / iced / winit diagnostics).
+env_logger = "0.11"
+acadrust = "0.4"
+# Shared DWG embedded-preview extraction (Start-page + file-manager thumbnails).
+dwg-thumbnailer = { path = "crates/dwg-thumbnailer" }
+flate2 = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
+inventory = "0.3"
+truck-shapeops = { version = "0.4", optional = true }
+# Fast non-cryptographic hasher. Handle/u64 keys dominate the hot block,
+# hatch, draw-depth and wire caches; the default SipHash is overkill there.
+rustc-hash = "2"
+# TrueType/OpenType support: fontdb enumerates the user's installed system
+# fonts; ttf-parser extracts glyph outlines we flatten into CAD wire strokes.
+# Both are already in the tree transitively via iced's cosmic-text, so pinning
+# them here adds no new downloads.
+fontdb = "0.23"
+ttf-parser = "0.25"
+# Full text-layout engine: shaping (ligatures, Arabic joining, kerning), bidi
+# reordering, and — crucially — automatic font fallback (a glyph missing from
+# the chosen family is shaped from another installed font). We use it only to
+# obtain positioned (font, glyph-id) runs; outlines come from ttf-parser and
+# render through our own wire pipeline.
+cosmic-text = "0.15"
+lyon_tessellation = "1.0.20"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Win32_System_Com    — COM behind "Set as default app"
+#                       (IApplicationAssociationRegistrationUI dialog).
+# Win32_System_Registry — HKCU registration that lists the app under
+#                       "Open with" for the portable .exe.
+windows-sys = { version = "0.61", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Registry", "Win32_Foundation"] }
+
+[patch.crates-io]
+# Tracks HakanSeven12/acadrust main (0.4.x): the plotstyle/material common-
+# entity ordering fix plus the in-flight DWG reader work, ahead of the crates.io
+# release. Drop the patch once those land in a published 0.4 crate.
+acadrust = { git = "https://github.com/HakanSeven12/acadrust", branch = "main" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native enables the plugin host runtime (out-of-process plugins).
+ocs_plugin_api = { path = "crates/ocs_plugin_api", features = ["host"] }
+rayon = "1"
+open = "5"
+# PDF export / printing. Native-only: printpdf pulls a wasm-incompatible
+# `memchr` (1.0.2) via lopdf → nom_locate, and the web build has no filesystem.
+printpdf = { version = "0.9.1", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Web gets the dependency-free manifest/ribbon contract only (no plugin host).
+ocs_plugin_api = { path = "crates/ocs_plugin_api" }
+console_error_panic_hook = "0.1"
+# ahash (via acadrust) pulls getrandom 0.3, which needs the `wasm_js` backend
+# enabled to support wasm32-unknown-unknown (plus the matching rustflag in
+# .cargo/config.toml).
+getrandom = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen = "0.2"
+# fetch() returns a JS Promise; bridge it to a Rust future for the per-script
+# web font loader (#141).
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+# window.open (external URLs) + Blob/anchor file downloads (Save) + fetch()
+# (Response) for the lazy per-script web font loader (#141).
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Navigator",
+    "Document",
+    "Element",
+    "HtmlAnchorElement",
+    "Blob",
+    "Url",
+    "Response",
+    # Async clipboard read for paste into the text/MText editors (iced's own
+    # clipboard read is a no-op on the web).
+    "Clipboard",
+] }
+# Browsers without WebGPU (e.g. Firefox by default) need wgpu's WebGL2 backend;
+# `webgl` enables it. `fira-sans` embeds the default UI font — the web has no
+# system fonts, so without it all iced text (ribbon labels, command line) is
+# blank. Features merge with the main `iced` dependency.
+iced = { version = "0.14", features = ["webgl", "fira-sans"] }
+
+[profile.release]
+strip = true

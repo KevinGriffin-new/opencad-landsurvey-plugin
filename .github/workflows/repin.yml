@@ -10,15 +10,24 @@ name: repin
 # path is not enough — that is what the gates are for:
 #
 #   - the host no longer accepts our api_version   (source migration needed)
-#   - the acadrust semver requirement moved         (0.4 -> 0.5 is a decision)
-#   - the plugin no longer compiles                 (contract/trait change)
+#   - the acadrust series moved (0.4 -> 0.5)       (API churn rides along)
+#   - our acadrust source does not match the one   (two acadrusts in one graph)
+#     ocs_plugin_api links
+#   - the plugin no longer compiles                (contract/trait change)
 #   - the test suite fails
-#   - the end-to-end check fails                    (built host won't load us)
-#   - the diff is not purely mechanical             (someone added source)
+#   - the end-to-end check fails                   (built host won't load us)
+#   - the diff is not purely mechanical            (someone added source)
 #
 # Any of those stops the release, leaves the PR open, and opens a GitHub issue.
 # Nine consecutive nightly failures once went unnoticed as red runs alone, so
 # escalation is a durable artifact, not a status colour.
+#
+# The gate logic itself lives in .github/scripts/repin_gates.py, not in heredocs
+# here, so that it can be unit-tested against the vendored corpus of real
+# upstream manifests in .github/scripts/tests/fixtures/host/. Every previous
+# break of these gates was an upstream respelling found by a red nightly run;
+# ci.yml now runs the corpus on every PR instead, and canary.yml watches
+# upstream main for shapes the parsers cannot read yet.
 on:
   schedule:
     - cron: "17 6 * * *"
@@ -38,6 +47,7 @@ concurrency:
 
 env:
   UPSTREAM: HakanSeven12/OpenCADStudio
+  GATES: .github/scripts/repin_gates.py
 
 jobs:
   detect:
@@ -60,7 +70,7 @@ jobs:
           fi
           # Deref annotated tags to the commit sha.
           SHA=$(gh api "repos/$UPSTREAM/commits/$TAG" --jq .sha)
-          CURRENT=$(grep -oP 'OpenCADStudio", rev = "\K[0-9a-f]{40}' Cargo.toml)
+          CURRENT=$(python3 "$GATES" current-pin | sed -n 's/^current_pin=//p')
           echo "upstream $TAG = $SHA ; pinned = $CURRENT"
           if [ "$SHA" = "$CURRENT" ] && [ "$DRY_RUN" != "true" ]; then
             echo "Pin is current — nothing to do."
@@ -104,196 +114,66 @@ jobs:
         with:
           key: repin
 
-      - name: Derive new pins from the upstream tag
-        id: pins
+      - name: Fetch the upstream manifests at the release tag
         run: |
-          # The acadrust pin comes from the host release's own Cargo.lock. Take
-          # the whole `source =` line, not just the rev: upstream has moved the
-          # crate between repositories once already (HakanSeven12/acadrust ->
-          # OpenAEC-Foundation/acadifc, which then 404'd the old URL), and a
-          # rev-only rewrite pins a commit that does not exist at the old URL.
+          set -euo pipefail
           gh api "repos/$UPSTREAM/contents/Cargo.lock?ref=$TAG" \
             -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.lock
-          eval "$(python3 - <<'EOF'
-          import re
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/Cargo.toml?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/host-api-Cargo.toml
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/manifest.rs
 
-          lines = open("/tmp/host-Cargo.lock").read().splitlines()
-          src = None
-          for i, l in enumerate(lines):
-              if l.strip() == 'name = "acadrust"':
-                  for m in lines[i : i + 5]:
-                      if m.startswith("source"):
-                          src = m.split("=", 1)[1].strip().strip('"')
-                          break
-                  break
-          if not src:
-              raise SystemExit("acadrust source not found in host Cargo.lock")
-          # git+https://host/owner/repo?branch=main#<40-hex>
-          m = re.fullmatch(r"git\+(?P<url>[^?#]+)(\?[^#]*)?#(?P<rev>[0-9a-f]{40})", src)
-          if not m:
-              raise SystemExit(f"unparseable acadrust source: {src}")
-          print(f'ACADRUST_URL={m.group("url")}')
-          print(f'ACADRUST_REV={m.group("rev")}')
-          EOF
-          )"
+      - name: Read the pins we ship today
+        id: old
+        run: python3 "$GATES" current-pin
 
-          # Same for the pin we currently carry — parsed generically so a URL
-          # change is detected rather than silently preserved.
-          eval "$(python3 - <<'EOF'
-          import re
+      # The new acadrust pin is copied from ocs_plugin_api's OWN manifest, not
+      # from the host root manifest and not from the lockfile's expanded sha.
+      # ocs_plugin_api is the crate we link, and cargo keys a git source on the
+      # literal `?rev=` text — so matching its spelling character for character
+      # is what puts one acadrust in the graph instead of two.
+      - name: Derive the new acadrust pin from ocs_plugin_api
+        id: pins
+        run: python3 "$GATES" linked-acadrust --plugin-api-manifest /tmp/host-api-Cargo.toml
 
-          cargo = open("Cargo.toml").read()
-          m = re.search(
-              r'^acadrust = \{ git = "(?P<url>[^"]+)", rev = "(?P<rev>[0-9a-f]{40})" \}',
-              cargo, re.M,
-          )
-          if not m:
-              raise SystemExit("could not parse the current acadrust patch in Cargo.toml")
-          print(f'OLD_ACADRUST_URL={m.group("url")}')
-          print(f'OLD_ACADRUST_REV={m.group("rev")}')
-          EOF
-          )"
-
-          # Compare owner/repo, not the literal URL: host v0.8.8 respelled the
-          # same source as `.../acadifc.git`, and a literal comparison reads a
-          # bare `.git` suffix as a repository move.
-          slug() { echo "$1" | sed -E 's#^[a-z+]+://##; s#\.git$##'; }
-          ACADRUST_SLUG=$(slug "$ACADRUST_URL")
-          OLD_ACADRUST_SLUG=$(slug "$OLD_ACADRUST_URL")
-
-          {
-            echo "acadrust_url=$ACADRUST_URL"
-            echo "acadrust_rev=$ACADRUST_REV"
-            echo "acadrust_slug=$ACADRUST_SLUG"
-            echo "old_acadrust_url=$OLD_ACADRUST_URL"
-            echo "old_acadrust_rev=$OLD_ACADRUST_REV"
-            echo "old_acadrust_slug=$OLD_ACADRUST_SLUG"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "acadrust: $OLD_ACADRUST_URL@${OLD_ACADRUST_REV:0:7}"
-          echo "       -> $ACADRUST_URL@${ACADRUST_REV:0:7}"
-          if [ "$ACADRUST_SLUG" != "$OLD_ACADRUST_SLUG" ]; then
-            echo "::notice::acadrust moved repositories: $OLD_ACADRUST_SLUG -> $ACADRUST_SLUG"
+      - name: Note a repository move
+        env:
+          NEW: ${{ steps.pins.outputs.acadrust_slug }}
+          OLD: ${{ steps.old.outputs.current_acadrust_slug }}
+        run: |
+          echo "acadrust: $OLD@${{ steps.old.outputs.current_acadrust_rev }}"
+          echo "       -> $NEW@${{ steps.pins.outputs.acadrust_rev }}"
+          if [ "$NEW" != "$OLD" ]; then
+            echo "::notice::acadrust moved repositories: $OLD -> $NEW"
           fi
 
-      # A repo move is mechanical; a semver-requirement move is not. `[patch]`
-      # only redirects where a version comes from — it cannot satisfy a
-      # requirement the manifest does not already allow. If the host moves to
-      # acadrust 0.5 while we require "0.4", cargo rejects the patch outright,
-      # and choosing the new requirement (plus whatever API churn rides along)
-      # is a source decision, not a pin bump.
-      - name: Gate on the acadrust version requirement
+      # A repo move, a rev bump and a respelling are all mechanical. A series
+      # move is not: cargo will not cross 0.4 -> 0.5 on its own, and the API
+      # churn that rides along is a source decision.
+      - name: Gate on the acadrust series
         id: acadver
-        run: |
-          gh api "repos/$UPSTREAM/contents/Cargo.toml?ref=$TAG" \
-            -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.toml
-          # Parse the manifests as TOML rather than grepping for one spelling.
-          # Host v0.8.8 rewrote `acadrust = "0.4"` as
-          # `acadrust = { version = "0.4", features = ["serde"] }`, which a
-          # line-oriented match read as "no requirement at all" and escalated —
-          # a false positive on a re-pin that was entirely mechanical.
-          python3 - <<'EOF'
-          import tomllib
-
-          def requirement(path):
-              with open(path, "rb") as f:
-                  doc = tomllib.load(f)
-              dep = doc.get("dependencies", {}).get("acadrust")
-              if dep is None:
-                  raise SystemExit(f"::error::no [dependencies].acadrust in {path}")
-              # Accept both `acadrust = "0.4"` and the table form.
-              if isinstance(dep, str):
-                  return dep
-              version = dep.get("version")
-              if version is None:
-                  raise SystemExit(f"::error::[dependencies].acadrust in {path} declares no version")
-              return version
-
-          host = requirement("/tmp/host-Cargo.toml")
-          ours = requirement("Cargo.toml")
-          print(f'host requires acadrust "{host}"; we require "{ours}"')
-          if host != ours:
-              raise SystemExit(
-                  f'::error::acadrust requirement moved "{ours}" -> "{host}". '
-                  "A [patch] only redirects where a version comes from — it cannot "
-                  "satisfy a requirement the manifest does not allow. This needs a "
-                  "source change, not a re-pin."
-              )
-          EOF
+        run: python3 "$GATES" gate-acadrust --host-lock /tmp/host-Cargo.lock --tag "$TAG"
 
       - name: Gate on the plugin API version handshake
         id: apiver
-        run: |
-          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=$TAG" \
-            -H "Accept: application/vnd.github.raw" > /tmp/manifest.rs
-          MAX=$(grep -oP 'API_VERSION: u32 = \K\d+' /tmp/manifest.rs)
-          MIN=$(grep -oP 'API_VERSION_MIN_SUPPORTED: u32 = \K\d+' /tmp/manifest.rs)
-          OURS=$(grep -oP 'api_version = \K\d+' plugin.toml)
-          echo "host accepts [$MIN, $MAX]; plugin declares $OURS"
-          if [ "$OURS" -lt "$MIN" ] || [ "$OURS" -gt "$MAX" ]; then
-            echo "::error::Host $TAG no longer accepts api_version=$OURS — a source migration is needed, not a re-pin."
-            exit 1
-          fi
-          # Acceptance is not enough. We link ocs_plugin_api and register with
-          # `ApiVersion::CURRENT`, so the cdylib reports the host's API_VERSION
-          # from `ocs_plugin_api_version()` no matter what plugin.toml claims.
-          # Declaring the old number still *loads* (the host accepts down to
-          # API_VERSION_MIN_SUPPORTED), which is exactly why api_version sat at
-          # 2 across three host releases without anyone noticing. Track MAX so
-          # the manifest describes the binary we actually ship.
-          echo "api_version=$MAX" >> "$GITHUB_OUTPUT"
-          if [ "$OURS" != "$MAX" ]; then
-            echo "::notice::api_version $OURS -> $MAX (host $TAG exports API_VERSION=$MAX)"
-          fi
+        run: python3 "$GATES" gate-api --manifest-rs /tmp/manifest.rs --tag "$TAG"
 
       - name: Rewrite pins and bump the patch version
         id: bump
-        env:
-          ACADRUST_URL: ${{ steps.pins.outputs.acadrust_url }}
-          ACADRUST_REV: ${{ steps.pins.outputs.acadrust_rev }}
-          API_VERSION: ${{ steps.apiver.outputs.api_version }}
         run: |
-          NEWVER=$(python3 - <<'EOF'
-          import os, re
-
-          tag, host_sha = os.environ["TAG"], os.environ["HOST_SHA"]
-          acad_url, acad_rev = os.environ["ACADRUST_URL"], os.environ["ACADRUST_REV"]
-          api_version = os.environ["API_VERSION"]
-
-          cargo = open("Cargo.toml").read()
-          cargo, n = re.subn(
-              r'(OpenCADStudio", rev = ")[0-9a-f]{40}', r"\g<1>" + host_sha, cargo
-          )
-          if n != 1:
-              raise SystemExit(f"expected 1 ocs_plugin_api rev to rewrite, rewrote {n}")
-
-          # Replace the whole patch entry so a repository move is carried too.
-          cargo, n = re.subn(
-              r'^acadrust = \{ git = "[^"]+", rev = "[0-9a-f]{40}" \}',
-              f'acadrust = {{ git = "{acad_url}", rev = "{acad_rev}" }}',
-              cargo, flags=re.M,
-          )
-          if n != 1:
-              raise SystemExit(f"expected 1 acadrust patch to rewrite, rewrote {n}")
-
-          # Keep the pin comments honest: they name the release the revs came from.
-          cargo = re.sub(r"Pinned to the v[\d.]+ RELEASE TAG commit", f"Pinned to the {tag} RELEASE TAG commit", cargo)
-          cargo = re.sub(r"Match the v[\d.]+ release's acadrust", f"Match the {tag} release's acadrust", cargo)
-
-          ver = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', cargo, re.M).groups()
-          new = f"{ver[0]}.{ver[1]}.{int(ver[2]) + 1}"
-          cargo = re.sub(r'^version = "[\d.]+"', f'version = "{new}"', cargo, count=1, flags=re.M)
-          open("Cargo.toml", "w").write(cargo)
-
-          plug = open("plugin.toml").read()
-          plug = re.sub(r'^version = "[\d.]+"', f'version = "{new}"', plug, count=1, flags=re.M)
-          plug = re.sub(r"^api_version = \d+", f"api_version = {api_version}", plug, count=1, flags=re.M)
-          open("plugin.toml", "w").write(plug)
-          print(new)
-          EOF
-          )
-          echo "newver=$NEWVER" >> "$GITHUB_OUTPUT"
+          python3 "$GATES" rewrite \
+            --tag "$TAG" \
+            --host-sha "$HOST_SHA" \
+            --acadrust-url "${{ steps.pins.outputs.acadrust_url }}" \
+            --acadrust-rev "${{ steps.pins.outputs.acadrust_rev }}" \
+            --api-version "${{ steps.apiver.outputs.api_version }}"
           git diff
+
+      # Preventive half of the ABI contract: our acadrust must be declared
+      # byte-for-byte the way ocs_plugin_api declares it.
+      - name: Gate on the acadrust source matching ocs_plugin_api
+        run: python3 "$GATES" gate-source --plugin-api-manifest /tmp/host-api-Cargo.toml
 
       # An automated release may only carry a mechanical re-pin. If anything
       # outside the three manifests changed, the diff is no longer something
@@ -309,12 +189,20 @@ jobs:
             exit 1
           fi
 
+      - name: Refresh the lockfile for the new pins
+        run: cargo generate-lockfile
+
+      # Empirical half of the ABI contract, and the gate that catches the class
+      # of break v0.9.5 introduced: exactly one acadrust in the graph, resolved
+      # to the same commit the host builds against.
+      - name: Gate on one acadrust at the host's rev
+        run: |
+          python3 "$GATES" gate-abi --host-rev "${{ steps.acadver.outputs.host_rev }}"
+
       - name: Build and test the plugin against the new pins
         run: |
-          # Refresh the committed lockfile for the new pins, then build from it.
           # release.yml builds `--locked`, so a PR that bumps Cargo.toml without
           # the matching Cargo.lock would pass here and fail at release time.
-          cargo generate-lockfile
           cargo build --release --locked
           cargo test --workspace --locked
 
@@ -374,14 +262,13 @@ jobs:
           ACADRUST_URL: ${{ steps.pins.outputs.acadrust_url }}
           ACADRUST_REV: ${{ steps.pins.outputs.acadrust_rev }}
           ACADRUST_SLUG: ${{ steps.pins.outputs.acadrust_slug }}
-          OLD_ACADRUST_URL: ${{ steps.pins.outputs.old_acadrust_url }}
-          OLD_ACADRUST_REV: ${{ steps.pins.outputs.old_acadrust_rev }}
-          OLD_ACADRUST_SLUG: ${{ steps.pins.outputs.old_acadrust_slug }}
+          OLD_ACADRUST_URL: ${{ steps.old.outputs.current_acadrust_url }}
+          OLD_ACADRUST_REV: ${{ steps.old.outputs.current_acadrust_rev }}
+          OLD_ACADRUST_SLUG: ${{ steps.old.outputs.current_acadrust_slug }}
+          RESOLVED_REV: ${{ steps.acadver.outputs.host_rev }}
           NEWVER: ${{ steps.bump.outputs.newver }}
           API_VERSION: ${{ steps.apiver.outputs.api_version }}
         run: |
-          ACAD_SHORT=${ACADRUST_REV:0:7}
-
           # What moved in acadrust between the pins, for the PR body. Only
           # meaningful when both revs live in the same repository — across a
           # move there is no common history to compare, and the old repo may be
@@ -403,27 +290,32 @@ jobs:
           # runs --locked, so the lockfile has to travel with the pin bump.
           git add Cargo.toml plugin.toml
           git add -f Cargo.lock
-          git commit -m "release: v$NEWVER — re-pin to host $TAG (acadrust $ACAD_SHORT)" \
+          git commit -m "release: v$NEWVER — re-pin to host $TAG (acadrust $ACADRUST_REV)" \
             -m "Mechanical pin bump per the rebuild rule, opened by the repin
           workflow. Tests and the headless host end-to-end check ran green in
           the workflow run that opened this PR."
           git push origin "repin/$TAG"
 
           gh pr create \
-            --title "release: v$NEWVER — re-pin to host $TAG (acadrust $ACAD_SHORT)" \
+            --title "release: v$NEWVER — re-pin to host $TAG (acadrust $ACADRUST_REV)" \
             --body "Automated re-pin: upstream released [\`$TAG\`](https://github.com/$UPSTREAM/releases/tag/$TAG).
 
           | pin | old | new |
           |---|---|---|
           | \`ocs_plugin_api\` | (previous) | \`$HOST_SHA\` ($TAG) |
-          | \`acadrust\` repo | \`$OLD_ACADRUST_URL\` | \`$ACADRUST_URL\` |
-          | \`acadrust\` rev | \`$OLD_ACADRUST_REV\` | \`$ACADRUST_REV\` |
+          | \`acadrust\` repo | \`$OLD_ACADRUST_SLUG\` | \`$ACADRUST_SLUG\` |
+          | \`acadrust\` rev | \`$OLD_ACADRUST_REV\` | \`$ACADRUST_REV\` (resolves to \`$RESOLVED_REV\`) |
           | \`api_version\` | (previous) | \`$API_VERSION\` |
 
-          **Checks run in this workflow:** api-version gate, \`cargo test --workspace --locked\`,
-          and the headless end-to-end check (host built at \`$TAG\` loads the plugin,
-          \`LS_PNEZD\` imports 3 points + labels onto \`LS-PT-*\` layers, \`LS_INVERSE draw\`
-          draws the labeled line).
+          The acadrust rev is copied verbatim from \`ocs_plugin_api\`'s manifest,
+          abbreviation included: cargo keys a git source on that literal text, so
+          expanding it would resolve a second acadrust into the graph.
+
+          **Checks run in this workflow:** acadrust series gate, api-version gate,
+          source-identity gate, one-acadrust-at-the-host's-rev gate,
+          \`cargo test --workspace --locked\`, and the headless end-to-end check
+          (host built at \`$TAG\` loads the plugin, \`LS_PNEZD\` imports 3 points +
+          labels onto \`LS-PT-*\` layers, \`LS_INVERSE draw\` draws the labeled line).
 
           **acadrust changes between the pins:**
           $ACAD_LOG
@@ -468,6 +360,12 @@ jobs:
   # Escalation. A gate stopped the mechanical path, so a human has to decide
   # something. A red run alone is not enough — nine consecutive nightly failures
   # once went unnoticed — so leave a durable, self-explaining artifact.
+  #
+  # Rather than restate the list of things that might have gone wrong, this job
+  # re-runs the read-only gates and reports what they actually say. Exit 2 means
+  # a parser here cannot read upstream's shape (a bug in this repo); exit 1 means
+  # the gates read it fine and a human has a decision; all-green means the break
+  # is downstream, in the build, tests, or end-to-end check.
   escalate:
     needs: [detect, repin]
     if: failure() && needs.detect.outputs.repin == 'true'
@@ -479,10 +377,74 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - uses: actions/checkout@v5
+
+      - name: Re-run the read-only gates to classify the failure
+        id: why
+        run: |
+          set -euo pipefail
+          gh api "repos/$UPSTREAM/contents/Cargo.lock?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/host-Cargo.lock
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/Cargo.toml?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/host-api-Cargo.toml
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=$TAG" \
+            -H "Accept: application/vnd.github.raw" > /tmp/manifest.rs
+
+          set +e
+          {
+            python3 "$GATES" linked-acadrust --plugin-api-manifest /tmp/host-api-Cargo.toml
+            echo "-> exit $?"
+            python3 "$GATES" gate-acadrust --host-lock /tmp/host-Cargo.lock --tag "$TAG"
+            a=$?; echo "-> exit $a"
+            python3 "$GATES" gate-api --manifest-rs /tmp/manifest.rs --tag "$TAG"
+            b=$?; echo "-> exit $b"
+          } > /tmp/gates.txt 2>&1
+          cat /tmp/gates.txt
+
+          if grep -q "exit 2" /tmp/gates.txt; then
+            echo "verdict=parser" >> "$GITHUB_OUTPUT"
+          elif grep -q "exit 1" /tmp/gates.txt; then
+            echo "verdict=decision" >> "$GITHUB_OUTPUT"
+          else
+            echo "verdict=downstream" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Open or update the escalation issue
+        env:
+          VERDICT: ${{ steps.why.outputs.verdict }}
         run: |
           set -euo pipefail
           TITLE="repin blocked: host $TAG needs a human"
+
+          case "$VERDICT" in
+            parser)
+              DIAGNOSIS="**The gates could not read upstream's manifests.** This is a
+          bug in this repository, not a decision for you to make. Upstream has
+          spelled something a way \`.github/scripts/repin_gates.py\` does not
+          handle yet.
+
+          The fix is always the same two steps:
+
+          1. Vendor the offending upstream files into
+             \`.github/scripts/tests/fixtures/host/$TAG/\`.
+          2. Teach \`repin_gates.py\` the new shape, asserting the new fixture in
+             \`.github/scripts/tests/test_repin_gates.py\`.
+
+          Adding the fixture in the same PR as the fix is what keeps this from
+          recurring — the corpus is the regression suite."
+              ;;
+            decision)
+              DIAGNOSIS="**A gate read upstream fine and stopped on purpose.** Something
+          changed that a pin bump cannot absorb — the acadrust series moved, or
+          the host no longer accepts our \`api_version\`. The gate output below
+          names which."
+              ;;
+            *)
+              DIAGNOSIS="**Every read-only gate is green**, so the break is downstream of
+          them: the build, \`cargo test --workspace --locked\`, the host build, or
+          the end-to-end check. Open the run log and look at the failing step."
+              ;;
+          esac
 
           BODY=$(cat <<EOF
           The automated re-pin to upstream \`$TAG\` did not pass its gates, so
@@ -490,34 +452,31 @@ jobs:
 
           **Run:** $RUN_URL
 
-          The bot ships a re-pin on its own only while the change stays
-          mechanical. One of these stopped it:
+          $DIAGNOSIS
 
-          - the host no longer accepts our \`api_version\` (source migration)
-          - the \`acadrust\` semver requirement moved (e.g. 0.4 -> 0.5)
-          - the plugin no longer compiles against the new contract
-          - \`cargo test --workspace --locked\` failed
-          - the end-to-end check failed (host at \`$TAG\` would not load us)
-          - the diff reached beyond \`Cargo.toml\` / \`plugin.toml\` / \`Cargo.lock\`
+          <details><summary>Gate output</summary>
 
-          Open the run log above; the failing step names which one and why.
+          \`\`\`
+          $(cat /tmp/gates.txt)
+          \`\`\`
+
+          </details>
 
           This issue is updated, not duplicated, on repeated failures for the
           same upstream tag. Close it once the re-pin lands.
           EOF
           )
 
-          # --repo on every call: this job deliberately has no checkout (it only
-          # talks to the API), so gh has no git remote to infer the repository
-          # from and otherwise dies with "not a git repository" — which is how a
-          # blocked re-pin once failed to notify anyone at all.
+          # --repo on every call: gh otherwise infers the repository from the git
+          # remote, and a checkout is not guaranteed to give it one — which is how
+          # a blocked re-pin once failed to notify anyone at all.
           EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
             --search "$TITLE in:title" \
             --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
 
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
-              --body "Still blocked as of $RUN_URL"
+              --body "Still blocked as of $RUN_URL ($VERDICT)"
             echo "commented on #$EXISTING"
           else
             gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
