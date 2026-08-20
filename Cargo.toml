@@ -1,6 +1,6 @@
 [package]
 name = "opencad-landsurvey-plugin"
-version = "0.4.13"
+version = "0.4.14"
 edition = "2021"
 description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
 license = "GPL-3.0-only"
@@ -11,31 +11,34 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
-# Pinned to the v0.9.4 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "17b2f158f463e519e72277c41cf2e9b2c21e5d80", features = ["host"] }
+# Pinned to the v0.9.6 RELEASE TAG commit (the MSI host) so contract types match.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "2d2ea97613831fbc90f7533bfaaa7516ee745190", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
-# records, so it names `acadrust` types directly. Must resolve to the *same*
-# acadrust as the host (via the patch below) for the loaded library to be
-# binary-compatible (approach B: same toolchain + dependency versions).
-acadrust = "0.4"
+# records, so it names `acadrust` types directly. It must resolve to the *same*
+# build of acadrust as the host, or the types crossing the plugin boundary are
+# not the same types (approach B: same toolchain + dependency versions).
+#
+# Match the v0.9.6 release's acadrust EXACTLY — same URL, same rev — read out of
+# THAT tag's Cargo.lock, never from whatever `main` happens to be. The crate has
+# moved twice: HakanSeven12/acadrust -> OpenAEC-Foundation/acadifc (host v0.8.7)
+# -> HakanSeven12/cadcodec (host v0.9.5), always as the `acadrust` package.
+#
+# This was a crates.io requirement redirected by [patch.crates-io] until host
+# v0.9.5, when ocs_plugin_api itself began depending on acadrust by git. A
+# crates.io patch does not reach a git-sourced dependency, so that arrangement
+# would have resolved two different acadrusts into one graph.
+#
+# The rev below is copied VERBATIM from ocs_plugin_api's own manifest, including
+# its abbreviation. Cargo keys a git source on the literal `?rev=` text, so
+# `rev = "931c4ab"` and `rev = "931c4ab0c590...b139f"` are two sources for one
+# commit, and writing the expanded form here really does lock two acadrusts.
+# `gate-source` in the re-pin workflow compares the spelling; `gate-abi` then
+# checks the lockfile resolved exactly one.
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "931c4ab", features = ["serde"] }
 
 # Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
 landsurvey = { path = "crates/landsurvey" }
-
-# Match the v0.9.4 release's acadrust EXACTLY (from its Cargo.lock) so the
-# loaded library is binary-compatible with the MSI host. (acadrust MAJOR bump
-# 0.3.4 -> 0.4 landed between host 0.6.6 and 0.7.2.)
-#
-# The crate MOVED between host v0.8.2 and v0.8.7: HakanSeven12/acadrust ->
-# OpenAEC-Foundation/acadifc (still the `acadrust` package). Upstream tracks the
-# fork by `branch = "main"`; we pin the rev their v0.8.7 lockfile resolved to,
-# because a branch pin drifts between rebuilds and would silently ship a cdylib
-# whose acadrust types no longer match the host's.
-# When re-pinning to a newer host, read the rev out of THAT tag's Cargo.lock —
-# never take whatever `main` happens to be at the time.
-[patch.crates-io]
-acadrust = { git = "https://github.com/OpenAEC-Foundation/acadifc.git", rev = "9ecaffc3f5c32bad61c9624b6acb03afe97a2863" }
 
 [workspace]
 members = ["crates/landsurvey", "crates/landsurvey-cli"]
