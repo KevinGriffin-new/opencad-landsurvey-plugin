@@ -7,3 +7,7 @@
 # each CI run and land a different ahash/nalgebra/rkyv inside the released .dll.
 # internal working draft for issue #157 — not for the public repo
 docs/landxml-import-proposal.md
+
+# Python bytecode from the re-pin gate tests.
+__pycache__/
+*.pyc
