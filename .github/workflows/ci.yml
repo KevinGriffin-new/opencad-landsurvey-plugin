@@ -1,0 +1,48 @@
+name: ci
+
+# Until now the only thing that ever ran `cargo test` was the nightly re-pin,
+# so a change to the gates got its first execution at 06:17 UTC against a live
+# upstream release — which is how the same gate broke three times. Everything
+# the re-pin relies on runs here first, on the PR that changes it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: re-pin gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Unit-test the gates against the vendored upstream corpus
+        run: python -m pytest .github/scripts/tests -v
+
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --locked
+        run: cargo build --release --locked
+      - name: cargo test --locked
+        run: cargo test --workspace --locked
+      # release.yml builds --locked, so a manifest bump committed without a
+      # refreshed lockfile would sail through everything above and fail only at
+      # release time. `--locked` also fails if generate-lockfile would change
+      # anything, which is the check we actually want.
+      - name: The committed lockfile is current
+        run: |
+          cargo metadata --locked --format-version 1 > /dev/null
+          git diff --exit-code Cargo.lock

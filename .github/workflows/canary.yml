@@ -1,0 +1,105 @@
+name: canary
+
+# Shape drift detector. The re-pin gates read upstream's manifests, and upstream
+# has respelled its acadrust dependency four times in six weeks — each time the
+# gates broke, and each time the news arrived as a blocked release.
+#
+# This job runs the same parsers against upstream `main` instead of the latest
+# release tag. Shape changes land on main days before they land in a release, so
+# a failure here is a heads-up with lead time rather than a stalled release. It
+# deliberately does NOT gate anything or touch the pins: it only reads.
+on:
+  schedule:
+    - cron: "41 5 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: HakanSeven12/OpenCADStudio
+
+jobs:
+  parse-upstream-main:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch upstream main
+        run: |
+          set -euo pipefail
+          for f in Cargo.toml Cargo.lock; do
+            gh api "repos/$UPSTREAM/contents/$f?ref=main" \
+              -H "Accept: application/vnd.github.raw" > "/tmp/host-$f"
+          done
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/Cargo.toml?ref=main" \
+            -H "Accept: application/vnd.github.raw" > /tmp/host-api-Cargo.toml
+          gh api "repos/$UPSTREAM/contents/crates/ocs_plugin_api/src/manifest.rs?ref=main" \
+            -H "Accept: application/vnd.github.raw" > /tmp/manifest.rs
+
+      # Every parser the re-pin depends on, run against tomorrow's upstream.
+      # Exit 2 (UNPARSEABLE) is the signal this job exists for: a shape no gate
+      # understands yet. Exit 1 (ESCALATE) means the gates read it fine and the
+      # answer is "a human decides" — real, but not a parser gap, and the
+      # nightly re-pin will report it against the actual release tag.
+      - name: Parse it with the current gates
+        id: parse
+        continue-on-error: true
+        run: |
+          set +e
+          G=".github/scripts/repin_gates.py"
+          python3 "$G" linked-acadrust --plugin-api-manifest /tmp/host-api-Cargo.toml
+          a=$?
+          python3 "$G" gate-acadrust --host-lock /tmp/host-Cargo.lock --tag main
+          b=$?
+          python3 "$G" gate-api --manifest-rs /tmp/manifest.rs --tag main
+          c=$?
+          echo "exit codes: linked=$a acadrust=$b api=$c"
+          for code in "$a" "$b" "$c"; do
+            if [ "$code" = "2" ]; then
+              echo "unparseable=true" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Open or update the shape-drift issue
+        if: steps.parse.outputs.unparseable == 'true'
+        run: |
+          set -euo pipefail
+          TITLE="canary: upstream main has a manifest shape the gates cannot read"
+          BODY=$(cat <<EOF
+          The re-pin gates could not parse something on \`$UPSTREAM@main\`. This
+          has not blocked a release yet — main is ahead of the latest tag — so
+          there is time to fix it before it does.
+
+          **Run:** $RUN_URL
+
+          The fix is always the same two steps:
+
+          1. Vendor the offending upstream files into
+             \`.github/scripts/tests/fixtures/host/<tag>/\` (Cargo.toml,
+             Cargo.lock, ocs_plugin_api-Cargo.toml, manifest.rs).
+          2. Teach \`.github/scripts/repin_gates.py\` the new shape, with the new
+             fixture asserted in \`tests/test_repin_gates.py\`.
+
+          Adding the fixture in the same PR as the fix is what keeps this from
+          recurring — the corpus is the regression suite.
+          EOF
+          )
+          EXISTING=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "$TITLE in:title" \
+            --json number,title --jq "[.[] | select(.title == \"$TITLE\")][0].number // empty")
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "$GITHUB_REPOSITORY" \
+              --body "Still unreadable as of $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi
