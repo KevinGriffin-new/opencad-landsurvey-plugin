@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acadrust"
 version = "0.4.1"
-source = "git+https://github.com/HakanSeven12/cadcodec.git?rev=931c4ab#931c4ab0c590b755e280bed318a35f41c57b139f"
+source = "git+https://github.com/HakanSeven12/cadcodec.git?rev=0908da7#0908da7b6e4f702a6c78359a57f53e2b79cf39eb"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -203,9 +203,9 @@ checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
 
 [[package]]
 name = "either"
-version = "1.17.0"
+version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
 name = "encoding_rs"
@@ -388,9 +388,9 @@ checksum = "e590f038c1464a96894fd6d10127e90a8be4509f56ff7ecef851b15cee0b7caa"
 
 [[package]]
 name = "icu_provider"
-version = "2.3.0"
+version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92a7ed671a6aad807a8651a2e1782a6598fda9ce5185dd8158549e95a91c6428"
+checksum = "d27bbb9d3abbefac45d55f647c9de1d44aafcd1186eb91879afef17c396c3e73"
 dependencies = [
  "displaydoc",
  "icu_locale_core",
@@ -545,7 +545,7 @@ dependencies = [
 [[package]]
 name = "ocs_plugin_api"
 version = "0.2.0"
-source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=2d2ea97613831fbc90f7533bfaaa7516ee745190#2d2ea97613831fbc90f7533bfaaa7516ee745190"
+source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=6317de2caa596bd2a8e898dab9019ba2667b0611#6317de2caa596bd2a8e898dab9019ba2667b0611"
 dependencies = [
  "acadrust",
  "bincode",
@@ -569,7 +569,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opencad-landsurvey-plugin"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "acadrust",
  "landsurvey",
@@ -1221,9 +1221,9 @@ dependencies = [
 
 [[package]]
 name = "zerovec-derive"
-version = "0.11.5"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f212a141d820099d57ffafb9569be9617a6f27d3dc881fbee8fb56642f917a9"
+checksum = "34df6fc39dbd26ddc9c10e6a2984476e13acce22e64e4487636ef494369225da"
 dependencies = [
  "proc-macro2",
  "quote",
