@@ -51,19 +51,29 @@ jobs:
       # understands yet. Exit 1 (ESCALATE) means the gates read it fine and the
       # answer is "a human decides" — real, but not a parser gap, and the
       # nightly re-pin will report it against the actual release tag.
+      #
+      # `host-plan` rather than `linked-acadrust`, because host v0.9.8 broke the
+      # re-pin without breaking any parser: ocs_plugin_api's manifest still read
+      # cleanly, and the host had started redirecting acadrust elsewhere with a
+      # [patch] nothing here looked at. host-plan reconciles the manifests
+      # against the host's own lockfile, so a redirect this file does not
+      # understand is unreadable input rather than a silently wrong pin.
       - name: Parse it with the current gates
         id: parse
         continue-on-error: true
         run: |
           set +e
           G=".github/scripts/repin_gates.py"
-          python3 "$G" linked-acadrust --plugin-api-manifest /tmp/host-api-Cargo.toml
+          python3 "$G" host-plan \
+            --plugin-api-manifest /tmp/host-api-Cargo.toml \
+            --host-manifest /tmp/host-Cargo.toml \
+            --host-lock /tmp/host-Cargo.lock
           a=$?
           python3 "$G" gate-acadrust --host-lock /tmp/host-Cargo.lock --tag main
           b=$?
           python3 "$G" gate-api --manifest-rs /tmp/manifest.rs --tag main
           c=$?
-          echo "exit codes: linked=$a acadrust=$b api=$c"
+          echo "exit codes: host-plan=$a acadrust=$b api=$c"
           for code in "$a" "$b" "$c"; do
             if [ "$code" = "2" ]; then
               echo "unparseable=true" >> "$GITHUB_OUTPUT"

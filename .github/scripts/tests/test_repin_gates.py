@@ -16,6 +16,7 @@ point of them is to prove the gate still fires when it should.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,11 @@ TAGS = {
     "v0.9.4": ("0.4.0", "github.com/OpenAEC-Foundation/acadifc", "9ecaffc3f5c32bad61c9624b6acb03afe97a2863"),
     "v0.9.5": ("0.4.1", "github.com/HakanSeven12/cadcodec", "7e2fa8c7c7c774edc4fa54b328b727dc76a3ad95"),
     "v0.9.6": ("0.4.1", "github.com/HakanSeven12/cadcodec", "931c4ab0c590b755e280bed318a35f41c57b139f"),
+    "v0.9.7": ("0.4.1", "github.com/HakanSeven12/cadcodec", "0908da7b6e4f702a6c78359a57f53e2b79cf39eb"),
+    # v0.9.8's slug carries the `git@` userinfo, because the host root patches
+    # the source to that spelling. Cargo treats it as a different source — which
+    # is what makes the patch legal, and what made the re-pin ship the wrong one.
+    "v0.9.8": ("0.4.1", "git@github.com/HakanSeven12/cadcodec", "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed"),
 }
 
 # How each tag spells [dependencies].acadrust in its Cargo.toml. The v0.8.8 row
@@ -57,6 +63,8 @@ MANIFEST_SHAPES = {
     "v0.9.4": "version",
     "v0.9.5": "git",
     "v0.9.6": "git",
+    "v0.9.7": "git",
+    "v0.9.8": "git",
 }
 
 API_WINDOWS = {
@@ -67,6 +75,8 @@ API_WINDOWS = {
     "v0.9.4": (2, 3),
     "v0.9.5": (2, 3),
     "v0.9.6": (2, 4),
+    "v0.9.7": (2, 4),
+    "v0.9.8": (2, 4),
 }
 
 
@@ -100,7 +110,10 @@ def test_host_manifest_shape_is_classified(tag):
     kind, value = rg.dep_kind(dep)
     assert kind == MANIFEST_SHAPES[tag]
     if kind == "git":
-        url, rev = value
+        # The EFFECTIVE source, patch applied — at v0.9.8 the root manifest
+        # declares one source in [dependencies] and redirects it in [patch], so
+        # the declared spelling alone no longer predicts what the host builds.
+        url, rev = rg.effective_acadrust(host(tag, "Cargo.toml"))
         assert rg.slug(url) == TAGS[tag][1]
         assert TAGS[tag][2].startswith(rev)  # manifest abbreviates the rev
 
@@ -124,7 +137,7 @@ def test_gate_acadrust_accepts_every_tag_for_the_legacy_manifest(tag):
     assert report["host_rev"] == TAGS[tag][2]
 
 
-@pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6"])
+@pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6", "v0.9.7", "v0.9.8"])
 def test_gate_acadrust_accepts_the_git_pinned_manifest(tag):
     """The shape we migrated to: our own git pin, compared series to series."""
     report = rg.gate_acadrust(
@@ -318,7 +331,8 @@ def test_rewrite_refuses_a_manifest_it_did_not_actually_match():
         rg.rewrite_manifests(
             '[package]\nversion = "0.1.0"\n[dependencies]\n'
             'ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "'
-            + "c" * 40 + '" }\n',
+            + "c" * 40 + '" }\n'
+            + rg.PATCH_BEGIN + "\n" + rg.NO_PATCH + "\n" + rg.PATCH_END + "\n",
             "version = \"0.1.0\"\napi_version = 3\n",
             tag="v9.9.9", host_sha=NEW_SHA, acad_url="https://example.invalid/a.git",
             acad_rev=NEW_REV, api_version=7,
@@ -366,6 +380,25 @@ def plugin_api(tag: str) -> str:
     return host(tag, "ocs_plugin_api-Cargo.toml")
 
 
+def shipped_host_tag() -> str:
+    """The corpus tag whose ocs_plugin_api matches the acadrust we declare.
+
+    Hardcoding a tag here goes stale the first time the re-pin ships: the tests
+    then compare what we ship against a host we no longer pin, and start passing
+    or failing for reasons unrelated to what they assert. A mechanical re-pin to
+    a release nobody had to debug leaves no fixture behind — that is the ratchet
+    working as intended — so not finding one is a skip, not a failure.
+    """
+    ours = rg.effective_acadrust((REPO / "Cargo.toml").read_text(encoding="utf-8"))
+    for tag in sorted(TAGS, reverse=True):
+        try:
+            if rg.linked_acadrust(plugin_api(tag)) == ours:
+                return tag
+        except (rg.Escalate, rg.Unparseable):
+            continue
+    pytest.skip("the host we ship is newer than the vendored corpus")
+
+
 @pytest.mark.parametrize("tag", ["v0.8.1", "v0.8.2", "v0.8.7", "v0.8.8", "v0.9.4"])
 def test_linked_acadrust_escalates_while_ocs_plugin_api_used_crates_io(tag):
     """Before v0.9.5 the linked crate took acadrust from crates.io.
@@ -377,18 +410,165 @@ def test_linked_acadrust_escalates_while_ocs_plugin_api_used_crates_io(tag):
         rg.linked_acadrust(plugin_api(tag))
 
 
-@pytest.mark.parametrize("tag,rev", [("v0.9.5", "7e2fa8c"), ("v0.9.6", "931c4ab")])
+@pytest.mark.parametrize("tag,rev", [("v0.9.5", "7e2fa8c"), ("v0.9.6", "931c4ab"),
+                                     ("v0.9.7", "0908da7"), ("v0.9.8", "5b2ae66")])
 def test_linked_acadrust_returns_the_rev_verbatim(tag, rev):
     """Abbreviated, exactly as upstream wrote it — not expanded to the full sha."""
     url, got = rg.linked_acadrust(plugin_api(tag))
     assert got == rev
     assert rg.slug(url) == "github.com/HakanSeven12/cadcodec"
-    assert TAGS[tag][2].startswith(got)
+
+
+@pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6", "v0.9.7"])
+def test_linked_rev_predicted_the_shipped_rev_until_v0_9_8(tag):
+    """Up to v0.9.7, ocs_plugin_api's spelling was the whole story."""
+    _, rev = rg.linked_acadrust(plugin_api(tag))
+    assert TAGS[tag][2].startswith(rev)
+
+
+def test_v0_9_8_ships_an_acadrust_ocs_plugin_api_does_not_name():
+    """The break this file's [patch] handling exists for.
+
+    ocs_plugin_api declares `5b2ae66`; the host root redirects that source and
+    ships `788eea0`. Copying the declared spelling — which is what every gate
+    before this one checked — produced a manifest that passed and a binary that
+    could not share the host's types.
+    """
+    _, declared = rg.linked_acadrust(plugin_api("v0.9.8"))
+    assert declared == "5b2ae66"
+    assert not TAGS["v0.9.8"][2].startswith(declared)
+
+
+# ---------------------------------------------- the host's [patch] redirect
+
+# What the host root declares for acadrust in [patch], per tag. Ground truth
+# from the vendored files, written down so a fixture that changes fails a test
+# instead of quietly redefining the expectation.
+HOST_PATCH = {
+    "v0.9.5": None,
+    "v0.9.6": None,
+    "v0.9.7": None,
+    "v0.9.8": ("https://github.com/HakanSeven12/cadcodec.git",
+               "https://git@github.com/HakanSeven12/cadcodec.git",
+               "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed"),
+}
+
+
+@pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6", "v0.9.7", "v0.9.8"])
+def test_patch_entry_reads_the_host_root(tag):
+    assert rg.patch_entry(host(tag, "Cargo.toml")) == HOST_PATCH[tag]
+
+
+def test_legacy_crates_io_patch_is_not_read_as_a_git_redirect():
+    """Before v0.9.5 the patch was a [patch.crates-io] branch pin.
+
+    It redirected acadrust too, but to a branch, which is a shape the re-pin
+    cannot mirror — a moving pin ships a different binary on every rebuild.
+    """
+    with pytest.raises(rg.Escalate, match="branch or tag"):
+        rg.patch_entry(host("v0.8.1", "Cargo.toml"))
+
+
+@pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6", "v0.9.7", "v0.9.8"])
+def test_host_plan_reproduces_the_hosts_lockfile(tag):
+    """The plan's whole job: manifests in, the shipped source out."""
+    plan = rg.host_acadrust_plan(plugin_api(tag), host(tag, "Cargo.toml"),
+                                 host(tag, "Cargo.lock"))
+    assert plan["locked_rev"] == TAGS[tag][2]
+    assert rg.slug(plan["locked_url"]) == TAGS[tag][1]
+    if HOST_PATCH[tag] is None:
+        assert plan["patch_key"] == ""
+        assert plan["locked_rev"].startswith(plan["rev"])
+    else:
+        assert (plan["patch_key"], plan["patch_url"], plan["patch_rev"]) == HOST_PATCH[tag]
+
+
+def test_host_plan_is_unparseable_when_it_cannot_explain_the_lockfile():
+    """An unexplained redirect is a gap here, not a decision for a human.
+
+    This is the case v0.9.8 actually was before the [patch] was read: the
+    manifests parsed perfectly and simply did not describe the binary upstream
+    shipped. Reported as UNPARSEABLE so canary.yml raises it against upstream
+    main, with lead time, instead of a release stalling on it.
+    """
+    lock = lock_with(("acadrust", "0.4.1", OTHER_REV))
+    with pytest.raises(rg.Unparseable, match="no \\[patch\\] to explain"):
+        rg.host_acadrust_plan(plugin_api("v0.9.6"), host("v0.9.6", "Cargo.toml"), lock)
+
+
+def test_host_plan_escalates_when_the_patch_targets_another_source():
+    """A redirect we could mirror, that would leave ocs_plugin_api unredirected.
+
+    Mirroring it verbatim would look right and lock two acadrusts: ours patched,
+    ocs_plugin_api's not.
+    """
+    manifest = host("v0.9.8", "Cargo.toml").replace(
+        '[patch."https://github.com/HakanSeven12/cadcodec.git"]',
+        '[patch."https://github.com/HakanSeven12/elsewhere.git"]',
+    )
+    with pytest.raises(rg.Escalate, match="would leave ocs_plugin_api"):
+        rg.host_acadrust_plan(plugin_api("v0.9.8"), manifest, host("v0.9.8", "Cargo.lock"))
+
+
+def test_host_plan_is_unparseable_when_the_patch_does_not_explain_the_lockfile():
+    manifest = host("v0.9.8", "Cargo.toml").replace(
+        '"788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed" }',
+        '"7e2fa8c7c7c774edc4fa54b328b727dc76a3ad95" }',
+    )
+    with pytest.raises(rg.Unparseable, match="does not explain the"):
+        rg.host_acadrust_plan(plugin_api("v0.9.8"), manifest, host("v0.9.8", "Cargo.lock"))
 
 
 def test_gate_source_identity_passes_for_what_we_ship():
+    """The real manifest against the real host it is pinned to, patch included."""
+    tag = shipped_host_tag()
     rg.gate_source_identity((REPO / "Cargo.toml").read_text(encoding="utf-8"),
-                            plugin_api("v0.9.6"))
+                            plugin_api(tag), host(tag, "Cargo.toml"))
+
+
+def synth_plugin(rev: str, patch=None) -> str:
+    """A minimal plugin manifest declaring acadrust, optionally patched."""
+    out = ['[package]', 'version = "0.1.0"', '', '[dependencies]',
+           'acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", '
+           f'rev = "{rev}", features = ["serde"] }}']
+    if patch is not None:
+        key, url, prev = patch
+        out += ['', f'[patch."{key}"]',
+                f'acadrust = {{ git = "{url}", rev = "{prev}" }}']
+    return "\n".join(out) + "\n"
+
+
+def test_gate_source_identity_requires_the_hosts_patch_to_be_mirrored():
+    """The exact state the failing nightly produced.
+
+    The dependency spelling matches ocs_plugin_api character for character — the
+    only thing this gate used to check — and the graph still resolves a
+    different acadrust, because the host's redirect is not mirrored.
+    """
+    ours = synth_plugin("5b2ae66")
+    rg.gate_source_identity(ours, plugin_api("v0.9.8"))  # the old gate is happy
+    with pytest.raises(rg.Escalate, match="mirror the host's exactly"):
+        rg.gate_source_identity(ours, plugin_api("v0.9.8"), host("v0.9.8", "Cargo.toml"))
+
+
+def test_gate_source_identity_rejects_a_patch_the_host_does_not_have():
+    """Mirroring runs both ways: a patch left behind is a break too.
+
+    A redirect upstream has dropped points us at a rev the host no longer
+    builds, and every spelling in the manifest still looks right.
+    """
+    ours = synth_plugin("0908da7", HOST_PATCH["v0.9.8"])
+    with pytest.raises(rg.Escalate, match="mirror the host's exactly"):
+        rg.gate_source_identity(ours, plugin_api("v0.9.7"), host("v0.9.7", "Cargo.toml"))
+
+
+def test_gate_source_identity_accepts_a_correctly_mirrored_patch():
+    ours = synth_plugin("5b2ae66", HOST_PATCH["v0.9.8"])
+    report = rg.gate_source_identity(ours, plugin_api("v0.9.8"),
+                                     host("v0.9.8", "Cargo.toml"))
+    assert "git@github.com" in report["patch"]
+    # And the manifest really does resolve to what the host ships.
+    assert rg.effective_acadrust(ours) == (HOST_PATCH["v0.9.8"][1], HOST_PATCH["v0.9.8"][2])
 
 
 def test_gate_source_identity_rejects_an_expanded_rev():
@@ -423,16 +603,66 @@ def test_rewrite_preserves_line_endings(tmp_path):
     plugin = tmp_path / "plugin.toml"
     plugin.write_bytes((REPO / "plugin.toml").read_bytes())
 
+    key, url, rev = HOST_PATCH["v0.9.8"]
     assert rg.main([
         "rewrite", "--tag", "v9.9.9", "--host-sha", NEW_SHA,
         "--acadrust-url", "https://github.com/HakanSeven12/cadcodec.git",
         "--acadrust-rev", "deadbee", "--api-version", "4",
+        # With a patch, so the generated block's own line endings are covered:
+        # it is composed rather than edited, so it is the one place a bare LF
+        # can be introduced from this file instead of inherited from the input.
+        "--patch-key", key, "--patch-url", url, "--patch-rev", rev,
         "--our-manifest", str(manifest), "--plugin-toml", str(plugin),
     ]) == rg.OK
 
     out = manifest.read_bytes()
-    assert out.count(b"\r\n") == src.count(b"\r\n")
+    # One line longer: the mirrored block went from the "no patch" note to a
+    # [patch] header plus its dependency. Everything else is edited in place.
+    assert out.count(b"\r\n") == src.count(b"\r\n") + 1
     assert b"\n" not in out.replace(b"\r\n", b""), "a bare LF crept in"
+
+
+def test_rewrite_mirrors_the_hosts_patch_and_then_drops_it():
+    """The block has to appear and disappear, not just change.
+
+    v0.9.7 had no acadrust patch, v0.9.8 added one, and nothing says a later
+    release keeps it. A rewrite that could only fill the block in would leave a
+    stale redirect behind the day upstream removes theirs — pointing us at a rev
+    the host no longer builds, with every spelling in the manifest still right.
+    """
+    cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
+    plugin = (REPO / "plugin.toml").read_text(encoding="utf-8")
+    common = dict(tag="v9.9.9", host_sha=NEW_SHA,
+                  acad_url="https://github.com/HakanSeven12/cadcodec.git",
+                  api_version=4)
+
+    added, _, _ = rg.rewrite_manifests(cargo, plugin, acad_rev="5b2ae66",
+                                       patch=HOST_PATCH["v0.9.8"], **common)
+    key, url, rev = HOST_PATCH["v0.9.8"]
+    assert f'[patch."{key}"]' in added
+    assert f'acadrust = {{ git = "{url}", rev = "{rev}" }}' in added
+    assert rg.NO_PATCH not in added
+    # The mirrored manifest resolves to the source the host actually ships.
+    assert rg.effective_acadrust(added) == (url, rev)
+    rg.gate_source_identity(added, plugin_api("v0.9.8"), host("v0.9.8", "Cargo.toml"))
+
+    dropped, _, _ = rg.rewrite_manifests(added, plugin, acad_rev="0908da7",
+                                         patch=None, **common)
+    assert rg.NO_PATCH in dropped
+    assert rg.patch_entry(dropped) is None
+    assert "patch" not in tomllib.loads(dropped)
+    rg.gate_source_identity(dropped, plugin_api("v0.9.7"), host("v0.9.7", "Cargo.toml"))
+
+
+def test_rewrite_refuses_a_manifest_without_the_patch_markers():
+    """Silently skipping the block is how a stale redirect ships unnoticed."""
+    cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8").replace(rg.PATCH_END, "")
+    with pytest.raises(rg.Unparseable, match="mirrored-patch block"):
+        rg.rewrite_manifests(
+            cargo, (REPO / "plugin.toml").read_text(encoding="utf-8"),
+            tag="v9.9.9", host_sha=NEW_SHA, acad_url="https://example.invalid/a.git",
+            acad_rev=NEW_REV, api_version=4,
+        )
 
 
 def test_rewrite_writes_an_abbreviated_rev_verbatim():
