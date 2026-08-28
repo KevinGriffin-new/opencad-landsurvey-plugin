@@ -11,6 +11,9 @@ gates was an upstream respelling that only a red nightly run could find:
               URL gained a ".git" suffix
       v0.9.5  acadrust = { git = ".../cadcodec.git", rev = "...", features = [...] }
               and no [patch] at all
+      v0.9.8  ocs_plugin_api still declares the same shape, but the host ROOT
+              adds [patch."https://github.com/.../cadcodec.git"] redirecting it
+              to "https://git@github.com/.../cadcodec.git" at a different rev
 
 Each of those tags is a fixture under tests/fixtures/host/, asserted in
 tests/test_repin_gates.py. The rule that stops the cycle: a shape that breaks a
@@ -149,6 +152,118 @@ def dep_kind(dep, name: str = "acadrust") -> tuple[str, object]:
     raise Unparseable(f"cannot classify {name} dependency: {dep!r}")
 
 
+# ------------------------------------------------------------------ patches
+
+
+def patch_entry(manifest_text: str, name: str = "acadrust"):
+    """The single `[patch."<url>"]` entry redirecting `name`, or None.
+
+    Host v0.9.8 added one. ocs_plugin_api still declares acadrust at
+    `https://github.com/HakanSeven12/cadcodec.git` rev `5b2ae66`; the host root
+    redirects that source to `https://git@github.com/HakanSeven12/cadcodec.git`
+    at rev `788eea0`. Cargo counts the `git@` userinfo as part of a source's
+    identity — which is exactly what makes the redirect legal, since a patch has
+    to point somewhere else — so the host ships an acadrust that neither its own
+    `[dependencies]` nor ocs_plugin_api's names anywhere.
+
+    A `[patch]` table applies only from the workspace root, and the plugin is its
+    own root. Copying ocs_plugin_api's spelling therefore reproduces the source
+    upstream patched *away from*: the pin looks right, every spelling gate
+    passes, and the lockfile resolves a different commit than the host runs.
+    Mirroring the redirect is the only way to land on the host's build.
+    """
+    patches = tomllib.loads(manifest_text).get("patch", {})
+    found = [(key, table[name]) for key, table in patches.items() if name in table]
+    if not found:
+        return None
+    if len(found) > 1:
+        keys = ", ".join(sorted(k for k, _ in found))
+        raise Escalate(
+            f"the host patches {name} from more than one source ({keys}). Which "
+            "redirect to mirror is a decision, not a copy."
+        )
+    key, dep = found[0]
+    kind, value = dep_kind(dep, name)
+    if kind != "git":
+        raise Escalate(
+            f"the host patches {name} to a published version ({value!r}) rather "
+            "than a git rev. Reproducing that is a source change, not a re-pin."
+        )
+    url, rev = value  # type: ignore[misc]
+    return key, url, rev
+
+
+def show_patch(patch) -> str:
+    """A patch entry as one readable line, for gate messages."""
+    if patch is None:
+        return "no [patch] for acadrust"
+    key, url, rev = patch
+    return f'[patch."{key}"] -> "{url}" rev "{rev}"'
+
+
+def host_acadrust_plan(plugin_api_manifest: str, host_manifest: str,
+                       host_lock: str) -> dict:
+    """How to reproduce the acadrust build the host actually ships.
+
+    Two manifest facts decide it: the spelling ocs_plugin_api declares, and the
+    `[patch]` redirect the host root applies on top. This works out both, then
+    checks that they land on the source the host's LOCKFILE records. The lockfile
+    is ground truth — it is the only file that says which acadrust the shipped
+    binary contains — so a plan that does not reproduce it means this file's
+    model of the host is incomplete, and every gate downstream would be reasoning
+    about the wrong source. That is `Unparseable`, not a decision: it is a gap
+    here, and canary.yml runs this against upstream `main` to find it early.
+    """
+    declared_url, declared_rev = linked_acadrust(plugin_api_manifest)
+    locked_url, locked_rev = git_source(locked_package(host_lock, "acadrust"))
+    patch = patch_entry(host_manifest)
+
+    plan = {"url": declared_url, "rev": declared_rev,
+            "patch_key": "", "patch_url": "", "patch_rev": "",
+            "locked_url": locked_url, "locked_rev": locked_rev}
+
+    if patch is None:
+        if slug(locked_url) != slug(declared_url) or not locked_rev.startswith(declared_rev):
+            raise Unparseable(
+                f"ocs_plugin_api declares acadrust {slug(declared_url)}@{declared_rev} "
+                f"but the host locks {slug(locked_url)}@{locked_rev[:7]}, and the host "
+                "root carries no [patch] to explain the difference. Something else "
+                "is redirecting the source."
+            )
+        return plan
+
+    key, patch_url, patch_rev = patch
+    if slug(key) != slug(declared_url):
+        raise Escalate(
+            f'the host patches "{key}", but ocs_plugin_api pulls acadrust from '
+            f'"{declared_url}". Mirroring that patch would leave ocs_plugin_api\'s '
+            "acadrust unredirected and the graph would carry two of them."
+        )
+    if slug(patch_url) != slug(locked_url) or not locked_rev.startswith(patch_rev):
+        raise Unparseable(
+            f"the host patches acadrust to {slug(patch_url)}@{patch_rev} but locks "
+            f"{slug(locked_url)}@{locked_rev[:7]}. The patch does not explain the "
+            "lockfile, so something else is redirecting the source."
+        )
+    plan |= {"patch_key": key, "patch_url": patch_url, "patch_rev": patch_rev}
+    return plan
+
+
+def effective_acadrust(manifest_text: str) -> tuple[str, str]:
+    """The acadrust source a manifest resolves to, its own `[patch]` applied."""
+    dep = declared_dep(manifest_text, "acadrust")
+    if dep is None:
+        raise Unparseable("no [dependencies].acadrust in the manifest")
+    kind, value = dep_kind(dep)
+    if kind != "git":
+        raise Unparseable("an effective git source is only defined for a git pin")
+    url, rev = value  # type: ignore[misc]
+    patch = patch_entry(manifest_text)
+    if patch is not None and slug(patch[0]) == slug(url):
+        return patch[1], patch[2]
+    return url, rev
+
+
 SEMVER = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
@@ -259,13 +374,22 @@ def gate_acadrust(host_lock: str, our_manifest: str, our_lock: str | None = None
     }
 
 
-def gate_source_identity(our_manifest: str, plugin_api_manifest: str) -> dict:
-    """We must declare acadrust byte-for-byte the way ocs_plugin_api declares it.
+def gate_source_identity(our_manifest: str, plugin_api_manifest: str,
+                         host_manifest: str | None = None) -> dict:
+    """We must resolve acadrust to the same source the host does.
 
-    This is the preventive half of the ABI contract; gate_abi is the empirical
-    half. Two spellings of the same commit are two sources to cargo, and the
-    resulting duplicate is invisible in a manifest diff — it only shows up in
-    the lockfile, or as a type error a hundred lines into the build.
+    Two halves, because upstream has broken it both ways:
+
+    - We declare acadrust byte-for-byte the way ocs_plugin_api declares it. Two
+      spellings of one commit are two sources to cargo, and the duplicate is
+      invisible in a manifest diff — it shows up in the lockfile, or as a type
+      error a hundred lines into the build.
+    - We carry exactly the host root's `[patch]` redirect for acadrust, or no
+      redirect if the host has none. A patch applies only from the workspace
+      root, so the host's does not reach us; without mirroring it we build the
+      source upstream redirected away from. This is what host v0.9.8 introduced.
+
+    Preventive half of the ABI contract; gate_abi is the empirical half.
     """
     want_url, want_rev = linked_acadrust(plugin_api_manifest)
     dep = declared_dep(our_manifest, "acadrust")
@@ -287,7 +411,23 @@ def gate_source_identity(our_manifest: str, plugin_api_manifest: str) -> dict:
             "including an abbreviated versus a full rev for the same commit — "
             "resolves two acadrusts into one graph."
         )
-    return {"url": got_url, "rev": got_rev}
+
+    report = {"url": got_url, "rev": got_rev}
+    if host_manifest is not None:
+        want_patch = patch_entry(host_manifest)
+        got_patch = patch_entry(our_manifest)
+        # Tuple equality, so this compares the literal strings — the same
+        # byte-for-byte discipline the dependency spelling gets, and for the
+        # same reason: cargo keys the replacement source on that text too.
+        if want_patch != got_patch:
+            raise Escalate(
+                f"the host root carries {show_patch(want_patch)}; we carry "
+                f"{show_patch(got_patch)}. A [patch] applies only from the "
+                "workspace root, so ours has to mirror the host's exactly — "
+                "otherwise we link a different acadrust than the host ships."
+            )
+        report["patch"] = show_patch(got_patch)
+    return report
 
 
 def gate_abi(our_lock: str, host_rev: str) -> dict:
@@ -332,6 +472,31 @@ def gate_api_version(manifest_rs: str, plugin_toml: str, tag: str = "upstream") 
 
 # ------------------------------------------------------------------- rewrite
 
+# The mirrored `[patch]` block is regenerated wholesale rather than edited in
+# place, because it has to be able to appear and disappear: v0.9.7 had no
+# acadrust patch, v0.9.8 added one, and a later release may drop it again. The
+# markers are what make "write nothing here" expressible as a substitution that
+# still asserts it fired exactly once.
+PATCH_BEGIN = "# --- BEGIN mirrored acadrust patch ---"
+PATCH_END = "# --- END mirrored acadrust patch ---"
+NO_PATCH = "# (the host declares no acadrust [patch] at this release)"
+
+
+# The mirrored block contains a line that reads exactly like the dependency the
+# rewrite edits — `acadrust = { git = "...", rev = "..." }` at column 0. Lifting
+# the whole region out before the other substitutions run, and putting it back
+# after, is what keeps "rewrote 1" honest. Doing it any other way made the
+# dependency rewrite match twice and abort, which is how this was found.
+PATCH_SENTINEL = "#<<<mirrored-acadrust-patch>>>"
+
+
+def render_patch_block(patch) -> str:
+    """The body between the markers: the host's redirect, or a note that there is none."""
+    if patch is None:
+        return NO_PATCH
+    key, url, rev = patch
+    return f'[patch."{key}"]\nacadrust = {{ git = "{url}", rev = "{rev}" }}'
+
 
 def bump_patch(version: str) -> str:
     major, minor, patch = parse_semver(version)
@@ -339,13 +504,27 @@ def bump_patch(version: str) -> str:
 
 
 def rewrite_manifests(cargo: str, plugin: str, *, tag: str, host_sha: str,
-                      acad_url: str, acad_rev: str,
-                      api_version: int) -> tuple[str, str, str]:
+                      acad_url: str, acad_rev: str, api_version: int,
+                      patch=None) -> tuple[str, str, str]:
     """Apply a mechanical re-pin, returning (Cargo.toml, plugin.toml, version).
 
     Every substitution asserts it fired exactly once. A regex that silently
     matches nothing is how a re-pin ships a manifest it did not actually update.
     """
+    # Line endings come from the file, not from the platform, for the same
+    # reason `read`/`write` disable translation: a CRLF checkout must not come
+    # back as a whole-file diff.
+    eol = "\r\n" if "\r\n" in cargo else "\n"
+    cargo, n = re.subn(
+        re.escape(PATCH_BEGIN) + r"\r?\n.*?" + re.escape(PATCH_END),
+        PATCH_SENTINEL, cargo, flags=re.S,
+    )
+    if n != 1:
+        raise Unparseable(
+            f"expected 1 mirrored-patch block between {PATCH_BEGIN!r} and "
+            f"{PATCH_END!r} to rewrite, rewrote {n}"
+        )
+
     cargo, n = re.subn(r'(OpenCADStudio", rev = ")[0-9a-f]{40}',
                        lambda m: m.group(1) + host_sha, cargo)
     if n != 1:
@@ -382,6 +561,10 @@ def rewrite_manifests(cargo: str, plugin: str, *, tag: str, host_sha: str,
                         plugin, count=1, flags=re.M)
     if n != 1:
         raise Unparseable(f"expected 1 api_version to rewrite, rewrote {n}")
+
+    # Mirror the host root's acadrust [patch], or clear ours when it has none.
+    body = render_patch_block(patch).replace("\n", eol)
+    cargo = cargo.replace(PATCH_SENTINEL, PATCH_BEGIN + eol + body + eol + PATCH_END)
     return cargo, plugin, new
 
 
@@ -434,8 +617,14 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("linked-acadrust", help="acadrust as ocs_plugin_api declares it")
     c.add_argument("--plugin-api-manifest", required=True)
 
-    c = sub.add_parser("gate-source", help="our acadrust spelling matches ocs_plugin_api's")
+    c = sub.add_parser("host-plan", help="the acadrust source the host actually ships")
     c.add_argument("--plugin-api-manifest", required=True)
+    c.add_argument("--host-manifest", required=True)
+    c.add_argument("--host-lock", required=True)
+
+    c = sub.add_parser("gate-source", help="our acadrust source matches the host's")
+    c.add_argument("--plugin-api-manifest", required=True)
+    c.add_argument("--host-manifest")
     c.add_argument("--our-manifest", default="Cargo.toml")
 
     c = sub.add_parser("gate-abi", help="one acadrust, at the host's rev")
@@ -453,6 +642,11 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--acadrust-url", required=True)
     c.add_argument("--acadrust-rev", required=True)
     c.add_argument("--api-version", type=int, required=True)
+    # Empty means "the host has no acadrust patch", which is a value the rewrite
+    # has to be able to express: it clears ours.
+    c.add_argument("--patch-key", default="")
+    c.add_argument("--patch-url", default="")
+    c.add_argument("--patch-rev", default="")
     c.add_argument("--our-manifest", default="Cargo.toml")
     c.add_argument("--plugin-toml", default="plugin.toml")
     return p
@@ -480,9 +674,27 @@ def main(argv: list[str] | None = None) -> int:
             url, rev = linked_acadrust(read(a.plugin_api_manifest))
             print(f"ocs_plugin_api pins acadrust to {slug(url)}@{rev}")
             emit({"acadrust_url": url, "acadrust_rev": rev, "acadrust_slug": slug(url)})
+        elif a.cmd == "host-plan":
+            r = host_acadrust_plan(read(a.plugin_api_manifest), read(a.host_manifest),
+                                   read(a.host_lock))
+            print(f"ocs_plugin_api pins acadrust to {slug(r['url'])}@{r['rev']}")
+            if r["patch_key"]:
+                print(f"host redirects it: [patch.\"{r['patch_key']}\"] -> "
+                      f"{slug(r['patch_url'])}@{r['patch_rev'][:7]}")
+            else:
+                print("host applies no acadrust [patch]")
+            print(f"host ships {slug(r['locked_url'])}@{r['locked_rev'][:7]}")
+            emit({"acadrust_url": r["url"], "acadrust_rev": r["rev"],
+                  "acadrust_slug": slug(r["url"]),
+                  "patch_key": r["patch_key"], "patch_url": r["patch_url"],
+                  "patch_rev": r["patch_rev"]})
         elif a.cmd == "gate-source":
-            r = gate_source_identity(read(a.our_manifest), read(a.plugin_api_manifest))
+            host_manifest = read(a.host_manifest) if a.host_manifest else None
+            r = gate_source_identity(read(a.our_manifest), read(a.plugin_api_manifest),
+                                     host_manifest)
             print(f"acadrust source matches ocs_plugin_api: {slug(r['url'])}@{r['rev']}")
+            if "patch" in r:
+                print(f"patch mirrors the host: {r['patch']}")
         elif a.cmd == "gate-abi":
             r = gate_abi(read(a.our_lock), a.host_rev)
             print(f"one acadrust {r['version']} at {r['rev'][:7]} ({r['url']})")
@@ -498,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
                 read(a.our_manifest), read(a.plugin_toml), tag=a.tag,
                 host_sha=a.host_sha, acad_url=a.acadrust_url,
                 acad_rev=a.acadrust_rev, api_version=a.api_version,
+                patch=(a.patch_key, a.patch_url, a.patch_rev) if a.patch_key else None,
             )
             write(a.our_manifest, cargo)
             write(a.plugin_toml, plugin)
