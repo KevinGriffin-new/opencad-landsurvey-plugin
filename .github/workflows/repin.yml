@@ -112,7 +112,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: rustup show active-toolchain
+      - name: Install the verified host compiler
+        shell: bash
+        run: |
+          # `rustup show` only reports since rustup 1.28; it no longer installs the
+          # toolchain named in rust-toolchain.toml. Install it explicitly so the
+          # step does what its name says, whatever rustup version the runner has.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
           key: repin
@@ -193,7 +199,10 @@ jobs:
       - name: Record the compiler used by the published host
         run: |
           python3 .github/scripts/record_host_build.py --tag "$TAG"
-          rustup show active-toolchain
+          # The record may have changed rust-toolchain.toml: install the
+          # compiler it now names before anything below invokes cargo.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
+          rustc --version
 
       # Preventive half of the ABI contract: our acadrust must be declared
       # byte-for-byte the way ocs_plugin_api declares it, and our [patch] must

@@ -35,7 +35,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: rustup show active-toolchain
+      - name: Install the verified host compiler
+        shell: bash
+        run: |
+          # `rustup show` only reports since rustup 1.28; it no longer installs the
+          # toolchain named in rust-toolchain.toml. Install it explicitly so the
+          # step does what its name says, whatever rustup version the runner has.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
       - run: python .github/scripts/build_metadata.py
       - uses: Swatinem/rust-cache@v2
       - name: cargo build --locked
@@ -58,7 +64,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: rustup show active-toolchain
+      - name: Install the verified host compiler
+        shell: bash
+        run: |
+          # `rustup show` only reports since rustup 1.28; it no longer installs the
+          # toolchain named in rust-toolchain.toml. Install it explicitly so the
+          # step does what its name says, whatever rustup version the runner has.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
       - uses: Swatinem/rust-cache@v2
       - run: python .github/scripts/build_metadata.py
       - run: cargo build --release --locked

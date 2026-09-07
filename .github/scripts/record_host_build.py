@@ -20,6 +20,17 @@ def gh(*args):
     return subprocess.check_output(["gh", *args], text=True, encoding="utf-8")
 
 
+def write_host_record(root, info):
+    """Write both provenance files with LF endings on every platform; the
+    release build byte-compares what it derives from them."""
+    (root / "host-build.json").write_text(
+        json.dumps(info, indent=2) + "\n", encoding="utf-8", newline="\n")
+    channel = info["rustc_version"].split()[1]
+    (root / "rust-toolchain.toml").write_text(
+        '[toolchain]\nchannel = "' + channel + '"\nprofile = "minimal"\n',
+        encoding="utf-8", newline="\n")
+
+
 def record(tag):
     commit = json.loads(gh("api", f"repos/{REPO}/commits/{tag}"))["sha"]
     runs = json.loads(gh("run", "list", "--repo", REPO,
@@ -38,9 +49,7 @@ def record(tag):
     root = Path(__file__).resolve().parents[2]
     info = dict(tag=tag, commit=commit, rustc_version=compiler, release_run=run,
         windows_asset=asset["name"], windows_sha256=asset["digest"].split(":")[1])
-    (root / "host-build.json").write_text(json.dumps(info, indent=2) + "\n")
-    (root / "rust-toolchain.toml").write_text(
-        '[toolchain]\nchannel = "' + compiler.split()[1] + '"\nprofile = "minimal"\n')
+    write_host_record(root, info)
 
 
 if __name__ == "__main__":

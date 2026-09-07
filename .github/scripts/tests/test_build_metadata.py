@@ -4,7 +4,7 @@ import tomllib
 
 import pytest
 from build_metadata import generate, validate
-from record_host_build import compiler_from_log
+from record_host_build import compiler_from_log, write_host_record
 from windows_smoke import check_replies
 import repin_gates as gates
 
@@ -57,3 +57,14 @@ def test_release_log_rejects_mixed_compilers():
 def test_smoke_rejects_plugin_that_did_not_load():
     with pytest.raises(AssertionError):
         check_replies(json.dumps({"cmd": "LS_PNEZD points.csv", "added": 0}))
+
+
+def test_host_record_is_written_with_lf_endings(tmp_path):
+    host = json.loads((ROOT / "host-build.json").read_text())
+    write_host_record(tmp_path, host)
+    for name in ("host-build.json", "rust-toolchain.toml"):
+        raw = (tmp_path / name).read_bytes()
+        assert b"\r" not in raw, f"{name} carries CR line endings"
+    assert json.loads((tmp_path / "host-build.json").read_text()) == host
+    toolchain = tomllib.loads((tmp_path / "rust-toolchain.toml").read_text())
+    assert toolchain["toolchain"]["channel"] == host["rustc_version"].split()[1]

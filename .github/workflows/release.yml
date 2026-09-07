@@ -55,7 +55,11 @@ jobs:
           python-version: "3.12"
       - name: Install the verified host compiler
         shell: bash
-        run: rustup show active-toolchain
+        run: |
+          # `rustup show` only reports since rustup 1.28; it no longer installs the
+          # toolchain named in rust-toolchain.toml. Install it explicitly so the
+          # step does what its name says, whatever rustup version the runner has.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
       - name: Verify host pin and compiler
         run: python .github/scripts/build_metadata.py
 
