@@ -140,10 +140,16 @@ def test_gate_acadrust_accepts_every_tag_for_the_legacy_manifest(tag):
 @pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6", "v0.9.7", "v0.9.8"])
 def test_gate_acadrust_accepts_the_git_pinned_manifest(tag):
     """The shape we migrated to: our own git pin, compared series to series."""
+    # The v0.9.8 host lockfile stands in for OUR lockfile here. The shipped
+    # Cargo.lock has moved on to the 0.5.x acadrust series with host v2026.36,
+    # so comparing it against these 0.4.x-era hosts would (correctly) escalate
+    # and this test would stop exercising the accept path. The shipped lock is
+    # checked against its own host in test_build_metadata.py
+    # (test_2026_36_dependency_override_and_api).
     report = rg.gate_acadrust(
         host(tag, "Cargo.lock"),
         (REPO / "Cargo.toml").read_text(encoding="utf-8"),
-        (REPO / "Cargo.lock").read_text(encoding="utf-8"),
+        host("v0.9.8", "Cargo.lock"),
         tag=tag,
     )
     assert rg.compat_series(report["our_version"]) == rg.compat_series(TAGS[tag][0])
@@ -175,11 +181,13 @@ def test_series_bump_escalates_for_the_legacy_manifest():
 
 def test_series_bump_escalates_for_the_git_manifest():
     bumped = lock_with(("acadrust", "0.5.0", CADCODEC))
+    # Same stand-in as above: a 0.4.x-series "our lock" is what makes the
+    # 0.5.0 host bump a series crossing. The shipped lock is already 0.5.x.
     with pytest.raises(rg.Escalate, match="Cargo will not cross"):
         rg.gate_acadrust(
             bumped,
             (REPO / "Cargo.toml").read_text(encoding="utf-8"),
-            (REPO / "Cargo.lock").read_text(encoding="utf-8"),
+            host("v0.9.8", "Cargo.lock"),
             tag="v9.9.9",
         )
 
@@ -319,7 +327,7 @@ def test_rewrite_preserves_everything_it_was_not_asked_to_change():
     out_cargo, _, _ = rg.rewrite_manifests(
         cargo, plugin, tag="v9.9.9", host_sha=NEW_SHA,
         acad_url="https://example.invalid/acadrust.git", acad_rev=NEW_REV,
-        api_version=7,
+        api_version=7, patch=rg.patch_entry(cargo),
     )
     assert out_cargo.count("\n") == cargo.count("\n"), "the rewrite added or dropped lines"
     assert "[workspace]" in out_cargo
@@ -352,6 +360,10 @@ def test_shipped_lockfile_agrees_with_the_shipped_pin():
     kind, value = rg.dep_kind(rg.declared_dep(cargo, "acadrust"))
     assert kind == "git", "the plugin pins acadrust by rev, like the host does"
     declared_url, declared_rev = value
+    patch = rg.patch_entry(cargo)
+    if patch is not None:
+        assert patch[0] == declared_url
+        _, declared_url, declared_rev = patch
     locked_url, locked_rev = rg.git_source(
         rg.locked_package((REPO / "Cargo.lock").read_text(encoding="utf-8"), "acadrust")
     )
@@ -616,9 +628,9 @@ def test_rewrite_preserves_line_endings(tmp_path):
     ]) == rg.OK
 
     out = manifest.read_bytes()
-    # One line longer: the mirrored block went from the "no patch" note to a
-    # [patch] header plus its dependency. Everything else is edited in place.
-    assert out.count(b"\r\n") == src.count(b"\r\n") + 1
+    # The shipped manifest may already carry a two-line patch block.
+    delta = 0 if rg.patch_entry(src.decode()) else 1
+    assert out.count(b"\r\n") == src.count(b"\r\n") + delta
     assert b"\n" not in out.replace(b"\r\n", b""), "a bare LF crept in"
 
 

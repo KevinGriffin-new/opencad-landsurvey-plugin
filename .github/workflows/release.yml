@@ -50,12 +50,18 @@ jobs:
           # Build the tagged commit, not whatever the default branch points at
           # by the time a called run starts.
           ref: ${{ inputs.tag || github.ref_name }}
-      # Floating `stable` on purpose: ABI compatibility with the host wants the
-      # same toolchain, and OpenCADStudio's own release workflow builds on
-      # `stable` too. Pinning a fixed rustc here would drift away from the host
-      # over time rather than towards it. The version is echoed in the build
-      # step so a failed load can be traced back to the exact compiler.
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the verified host compiler
+        shell: bash
+        run: |
+          # `rustup show` only reports since rustup 1.28; it no longer installs the
+          # toolchain named in rust-toolchain.toml. Install it explicitly so the
+          # step does what its name says, whatever rustup version the runner has.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
+      - name: Verify host pin and compiler
+        run: python .github/scripts/build_metadata.py
 
       # A release whose tag disagrees with the manifests ships a plugin that
       # reports the wrong version to the Plugin Manager. Catch it before the
@@ -91,11 +97,45 @@ jobs:
           # The cdylib name varies by platform (lib*.so / *.dll / lib*.dylib);
           # the host loader accepts any name with the right extension.
           cp target/release/*.${{ matrix.ext }} "dist/${{ matrix.asset }}"
-          cp plugin.toml dist/plugin.toml
+          python .github/scripts/build_metadata.py --output dist/plugin.toml --build-info "dist/${{ matrix.asset }}.build.json"
+      - name: Test the published Windows host
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $hostBuild = Get-Content host-build.json | ConvertFrom-Json
+          gh release download $hostBuild.tag --repo HakanSeven12/OpenCADStudio --pattern $hostBuild.windows_asset --dir .compat-host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/scripts/windows_smoke.py --host ".compat-host/$($hostBuild.windows_asset)"
+      - uses: actions/upload-artifact@v4
+        if: always() && runner.os == 'Windows'
+        with:
+          name: windows-compatibility-logs
+          path: .compat-host/logs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+      - name: Verify platform manifests agree before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmp artifacts/release-ubuntu-latest/plugin.toml artifacts/release-windows-latest/plugin.toml
+          cmp artifacts/release-ubuntu-latest/plugin.toml artifacts/release-macos-latest/plugin.toml
+          mkdir dist
+          cp artifacts/release-*/opencad.landsurvey-* dist/
+          cp artifacts/release-ubuntu-latest/plugin.toml dist/
       - uses: softprops/action-gh-release@v3
         with:
-          # Explicit: on the workflow_call path there is no tag ref to infer.
           tag_name: ${{ inputs.tag || github.ref_name }}
-          files: |
-            dist/${{ matrix.asset }}
-            dist/plugin.toml
+          files: dist/*

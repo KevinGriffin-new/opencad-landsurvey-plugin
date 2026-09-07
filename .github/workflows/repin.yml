@@ -109,7 +109,16 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the verified host compiler
+        shell: bash
+        run: |
+          # `rustup show` only reports since rustup 1.28; it no longer installs the
+          # toolchain named in rust-toolchain.toml. Install it explicitly so the
+          # step does what its name says, whatever rustup version the runner has.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
       - uses: Swatinem/rust-cache@v2
         with:
           key: repin
@@ -187,6 +196,14 @@ jobs:
             --patch-rev "${{ steps.pins.outputs.patch_rev }}"
           git diff
 
+      - name: Record the compiler used by the published host
+        run: |
+          python3 .github/scripts/record_host_build.py --tag "$TAG"
+          # The record may have changed rust-toolchain.toml: install the
+          # compiler it now names before anything below invokes cargo.
+          rustup toolchain install "$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)" --profile minimal
+          rustc --version
+
       # Preventive half of the ABI contract: our acadrust must be declared
       # byte-for-byte the way ocs_plugin_api declares it, and our [patch] must
       # mirror the host root's exactly (or be absent, when the host has none).
@@ -204,7 +221,7 @@ jobs:
           CHANGED=$(git diff --name-only | sort | tr '\n' ' ')
           echo "changed: $CHANGED"
           UNEXPECTED=$(git diff --name-only \
-            | grep -vE '^(Cargo\.toml|plugin\.toml|Cargo\.lock)$' || true)
+            | grep -vE '^(Cargo\.toml|plugin\.toml|Cargo\.lock|host-build\.json|rust-toolchain\.toml)$' || true)
           if [ -n "$UNEXPECTED" ]; then
             echo "::error::re-pin touched files beyond the manifests: $UNEXPECTED"
             exit 1
@@ -219,6 +236,9 @@ jobs:
       - name: Gate on one acadrust at the host's rev
         run: |
           python3 "$GATES" gate-abi --host-rev "${{ steps.acadver.outputs.host_rev }}"
+
+      - name: Verify published host compiler before building
+        run: python3 .github/scripts/build_metadata.py
 
       - name: Build and test the plugin against the new pins
         run: |
@@ -240,8 +260,8 @@ jobs:
         run: |
           STAGE=$(mktemp -d)
           mkdir -p "$STAGE/plugins/opencad.landsurvey"
-          cp plugin.toml target/release/libopencad_landsurvey_plugin.so \
-            "$STAGE/plugins/opencad.landsurvey/"
+          python3 .github/scripts/build_metadata.py --output "$STAGE/plugins/opencad.landsurvey/plugin.toml"
+          cp target/release/libopencad_landsurvey_plugin.so "$STAGE/plugins/opencad.landsurvey/"
           printf '1,5000.00,5000.00,100.00,IPF\n2,5100.00,5050.00,101.25,IPF\n3,5200.00,4980.00,99.80,MON\n' \
             > "$STAGE/points.csv"
           {
@@ -321,7 +341,7 @@ jobs:
           git checkout -b "repin/$TAG"
           # -f because Cargo.lock was gitignored historically; the release build
           # runs --locked, so the lockfile has to travel with the pin bump.
-          git add Cargo.toml plugin.toml
+          git add Cargo.toml plugin.toml host-build.json rust-toolchain.toml
           git add -f Cargo.lock
           git commit -m "release: v$NEWVER — re-pin to host $TAG (acadrust $ACADRUST_REV)" \
             -m "Mechanical pin bump per the rebuild rule, opened by the repin

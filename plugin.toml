@@ -1,17 +1,15 @@
 [plugin]
 id = "opencad.landsurvey"
 name = "Land Survey"
-version = "0.4.16"
+version = "0.4.17"
 description = "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, coordinate transforms (RTS / Helmert), and animated SVG explainers"
 author = "Kevin Griffin"
 license = "GPL-3.0-only"
 
 [opencad]
-# Must match the `API_VERSION` the linked ocs_plugin_api exports — that is what
-# the cdylib reports from `ocs_plugin_api_version()`, and the loader checks it
-# before running any plugin code. Host v0.8.x is API v3 (it still accepts v2,
-# `API_VERSION_MIN_SUPPORTED`, but declaring 2 here misreports the binary).
-api_version = 4
+# Must match API_VERSION exported by the linked ocs_plugin_api.
+# Studio 2026.36 uses API 5; generated build metadata is added during packaging.
+api_version = 5
 ribbon_order = 50
 command_prefixes = ["LS_"]
 xdata_apps = ["LANDSURVEY_POINT", "LANDSURVEY_PLAN", "LANDSURVEY_SURFACE"]
