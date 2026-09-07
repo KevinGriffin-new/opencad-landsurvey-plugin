@@ -26,7 +26,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN_ID,
     name: "Land Survey",
     version: env!("CARGO_PKG_VERSION"),
-    description: "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, coordinate transforms (RTS / Helmert), and animated SVG explainers",
+    description: "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection).",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 50,
     // Both XDATA applications this plugin writes (see dispatch.rs). Declaring
