@@ -140,6 +140,12 @@ def test_gate_acadrust_accepts_every_tag_for_the_legacy_manifest(tag):
 @pytest.mark.parametrize("tag", ["v0.9.5", "v0.9.6", "v0.9.7", "v0.9.8"])
 def test_gate_acadrust_accepts_the_git_pinned_manifest(tag):
     """The shape we migrated to: our own git pin, compared series to series."""
+    # The v0.9.8 host lockfile stands in for OUR lockfile here. The shipped
+    # Cargo.lock has moved on to the 0.5.x acadrust series with host v2026.36,
+    # so comparing it against these 0.4.x-era hosts would (correctly) escalate
+    # and this test would stop exercising the accept path. The shipped lock is
+    # checked against its own host in test_build_metadata.py
+    # (test_2026_36_dependency_override_and_api).
     report = rg.gate_acadrust(
         host(tag, "Cargo.lock"),
         (REPO / "Cargo.toml").read_text(encoding="utf-8"),
@@ -175,6 +181,8 @@ def test_series_bump_escalates_for_the_legacy_manifest():
 
 def test_series_bump_escalates_for_the_git_manifest():
     bumped = lock_with(("acadrust", "0.5.0", CADCODEC))
+    # Same stand-in as above: a 0.4.x-series "our lock" is what makes the
+    # 0.5.0 host bump a series crossing. The shipped lock is already 0.5.x.
     with pytest.raises(rg.Escalate, match="Cargo will not cross"):
         rg.gate_acadrust(
             bumped,
