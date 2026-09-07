@@ -143,7 +143,7 @@ def test_gate_acadrust_accepts_the_git_pinned_manifest(tag):
     report = rg.gate_acadrust(
         host(tag, "Cargo.lock"),
         (REPO / "Cargo.toml").read_text(encoding="utf-8"),
-        (REPO / "Cargo.lock").read_text(encoding="utf-8"),
+        host("v0.9.8", "Cargo.lock"),
         tag=tag,
     )
     assert rg.compat_series(report["our_version"]) == rg.compat_series(TAGS[tag][0])
@@ -179,7 +179,7 @@ def test_series_bump_escalates_for_the_git_manifest():
         rg.gate_acadrust(
             bumped,
             (REPO / "Cargo.toml").read_text(encoding="utf-8"),
-            (REPO / "Cargo.lock").read_text(encoding="utf-8"),
+            host("v0.9.8", "Cargo.lock"),
             tag="v9.9.9",
         )
 
@@ -319,7 +319,7 @@ def test_rewrite_preserves_everything_it_was_not_asked_to_change():
     out_cargo, _, _ = rg.rewrite_manifests(
         cargo, plugin, tag="v9.9.9", host_sha=NEW_SHA,
         acad_url="https://example.invalid/acadrust.git", acad_rev=NEW_REV,
-        api_version=7,
+        api_version=7, patch=rg.patch_entry(cargo),
     )
     assert out_cargo.count("\n") == cargo.count("\n"), "the rewrite added or dropped lines"
     assert "[workspace]" in out_cargo
@@ -352,6 +352,10 @@ def test_shipped_lockfile_agrees_with_the_shipped_pin():
     kind, value = rg.dep_kind(rg.declared_dep(cargo, "acadrust"))
     assert kind == "git", "the plugin pins acadrust by rev, like the host does"
     declared_url, declared_rev = value
+    patch = rg.patch_entry(cargo)
+    if patch is not None:
+        assert patch[0] == declared_url
+        _, declared_url, declared_rev = patch
     locked_url, locked_rev = rg.git_source(
         rg.locked_package((REPO / "Cargo.lock").read_text(encoding="utf-8"), "acadrust")
     )
@@ -616,9 +620,9 @@ def test_rewrite_preserves_line_endings(tmp_path):
     ]) == rg.OK
 
     out = manifest.read_bytes()
-    # One line longer: the mirrored block went from the "no patch" note to a
-    # [patch] header plus its dependency. Everything else is edited in place.
-    assert out.count(b"\r\n") == src.count(b"\r\n") + 1
+    # The shipped manifest may already carry a two-line patch block.
+    delta = 0 if rg.patch_entry(src.decode()) else 1
+    assert out.count(b"\r\n") == src.count(b"\r\n") + delta
     assert b"\n" not in out.replace(b"\r\n", b""), "a bare LF crept in"
 
 

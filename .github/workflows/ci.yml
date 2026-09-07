@@ -32,7 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: rustup show active-toolchain
+      - run: python .github/scripts/build_metadata.py
       - uses: Swatinem/rust-cache@v2
       - name: cargo build --locked
         run: cargo build --release --locked
@@ -46,3 +50,32 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 > /dev/null
           git diff --exit-code Cargo.lock
+
+  windows-compatibility:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: python .github/scripts/build_metadata.py
+      - run: cargo build --release --locked
+      - name: Stage plugin and download published host
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python .github/scripts/build_metadata.py --output dist/plugin.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item target/release/opencad_landsurvey_plugin.dll dist/opencad.landsurvey-windows-x86_64.dll
+          $hostBuild = Get-Content host-build.json | ConvertFrom-Json
+          gh release download $hostBuild.tag --repo HakanSeven12/OpenCADStudio --pattern $hostBuild.windows_asset --dir .compat-host
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python .github/scripts/windows_smoke.py --host ".compat-host/$($hostBuild.windows_asset)"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-compatibility-logs
+          path: .compat-host/logs

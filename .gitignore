@@ -1,4 +1,7 @@
 /target
+/.compat-host
+/dist
+/.pytest_cache
 **/*.rs.bk
 # Cargo.lock IS committed. The usual "libraries don't commit a lockfile" advice
 # does not apply: this crate ships a cdylib that has to be binary-compatible
