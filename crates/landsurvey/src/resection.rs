@@ -262,7 +262,7 @@ fn angle_error_amplification(
     station: (f64, f64),
     mean_distance: f64,
 ) -> f64 {
-    let one_arcsecond_deg = 1.0 / 3_600.0;
+    let one_arcsecond_deg: f64 = 1.0 / 3_600.0;
     let one_arcsecond_rad = one_arcsecond_deg.to_radians();
     let reference = mean_distance * one_arcsecond_rad;
     if !reference.is_finite() || reference <= 0.0 {
