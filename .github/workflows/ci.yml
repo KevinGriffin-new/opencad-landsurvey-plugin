@@ -86,11 +86,22 @@ jobs:
           gh release download $hostBuild.tag --repo HakanSeven12/OpenCADStudio --pattern $hostBuild.windows_asset --dir .compat-host
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python .github/scripts/windows_smoke.py --host ".compat-host/$($hostBuild.windows_asset)"
+      - name: Run black-box field regression suite
+        shell: pwsh
+        run: |
+          $hostBuild = Get-Content host-build.json | ConvertFrom-Json
+          python field-tests/test_no_app.py `
+            --host ".compat-host/$($hostBuild.windows_asset)" `
+            --package dist `
+            --host-record host-build.json `
+            --output field-test-results
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: windows-compatibility-logs
-          path: .compat-host/logs
+          path: |
+            .compat-host/logs
+            field-test-results
       - uses: actions/upload-artifact@v4
         if: always()
         with:

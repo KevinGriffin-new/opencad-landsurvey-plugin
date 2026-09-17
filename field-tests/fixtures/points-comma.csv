@@ -1,0 +1,4 @@
+# P,N,E,Z,D — decimal point, ordinary comma delimiter
+1,5000,5000,100,IPF
+2,5100,5050,101.25,IPF
+3,5200,4980,99.8,MON
