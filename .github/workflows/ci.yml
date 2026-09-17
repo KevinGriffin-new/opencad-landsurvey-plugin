@@ -91,3 +91,11 @@ jobs:
         with:
           name: windows-compatibility-logs
           path: .compat-host/logs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: landsurvey-plugin-windows
+          path: |
+            dist/plugin.toml
+            dist/opencad.landsurvey-windows-x86_64.dll
+          if-no-files-found: error
