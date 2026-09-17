@@ -62,6 +62,23 @@ pub struct ResectionResult {
     pub method: ResectionMethod,
 }
 
+/// Angle-error amplification limits for the three-point solution.  The factor
+/// is the station displacement caused by a one-arcsecond direction error,
+/// divided by the displacement represented by one arcsecond at the mean shot
+/// distance.
+pub const DANGER_CIRCLE_WARN_AMPLIFICATION: f64 = 10.0;
+pub const DANGER_CIRCLE_REJECT_AMPLIFICATION: f64 = 50.0;
+
+/// Result of the angle-only three-point solver, including the geometry-quality
+/// diagnostics that are not available from the coordinate-only Tienstra API.
+#[derive(Debug, Clone)]
+pub struct ThreePointResult {
+    pub station: (f64, f64),
+    pub orientation_deg: f64,
+    pub subtended_deg: [f64; 3],
+    pub amplification: f64,
+}
+
 impl ResectionResult {
     /// Grid azimuth (degrees, CW-from-N, `[0,360)`) for a circle reading.
     pub fn azimuth_of(&self, reading_deg: f64) -> f64 {
@@ -157,6 +174,135 @@ pub fn resection_three_point(
         (wa * a.0 + wb * b.0 + wc * c.0) / sum,
         (wa * a.1 + wb * b.1 + wc * c.1) / sum,
     ))
+}
+
+/// Recover the directed subtended angles from three circle readings.
+///
+/// Readings increase clockwise from North, while the coordinate cross product
+/// uses the usual `(E,N)` orientation.  The sense of the control triangle tells
+/// us which directed ray gaps belong to `[∠BPC, ∠CPA, ∠APB]`; taking the minor
+/// gap loses the reflex angle when the occupied station is outside the control
+/// triangle and can mirror the solution to the wrong side.
+pub fn subtended_from_directions(
+    a: (f64, f64),
+    b: (f64, f64),
+    c: (f64, f64),
+    ra: f64,
+    rb: f64,
+    rc: f64,
+) -> Result<[f64; 3], &'static str> {
+    let orientation = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
+    if !orientation.is_finite() || orientation.abs() < 1e-12 {
+        return Err("degenerate control (collinear or coincident known points)");
+    }
+    if ![ra, rb, rc].into_iter().all(|value| value.is_finite()) {
+        return Err("direction readings must be finite");
+    }
+
+    // Increasing circle readings are clockwise.  For a CCW control triangle,
+    // traverse the rays in the opposite (decreasing-reading) sense; reverse
+    // that choice for a CW control triangle.
+    let diff = |from: f64, to: f64| (from - to).rem_euclid(360.0);
+    let angles = if orientation > 0.0 {
+        [diff(rb, rc), diff(rc, ra), diff(ra, rb)]
+    } else {
+        [diff(rc, rb), diff(ra, rc), diff(rb, ra)]
+    };
+    if angles.iter().any(|&angle| angle < 1e-12) {
+        return Err("direction readings contain coincident rays");
+    }
+    Ok(angles)
+}
+
+/// Solve an angle-only shot file using the same directed-angle convention as
+/// the instrument readings.  The solution is refused when a one-arcsecond
+/// direction error would be amplified more than 50 times by the control
+/// geometry; a caller can warn separately above 10 times.
+pub fn resection_three_point_shots(shots: &[ResectionShot]) -> Result<ThreePointResult, String> {
+    if shots.len() != 3 || shots.iter().any(|shot| shot.distance.is_some()) {
+        return Err("angle-only three-point resection needs exactly 3 shots without distances".into());
+    }
+    let [a, b, c] = [shots[0].known, shots[1].known, shots[2].known];
+    let angles = subtended_from_directions(
+        a,
+        b,
+        c,
+        shots[0].direction_deg,
+        shots[1].direction_deg,
+        shots[2].direction_deg,
+    )
+    .map_err(|error| error.to_string())?;
+    let station = resection_three_point(a, b, c, angles).map_err(|error| error.to_string())?;
+    let mean_distance = shots
+        .iter()
+        .map(|shot| (shot.known.0 - station.0).hypot(shot.known.1 - station.1))
+        .sum::<f64>()
+        / 3.0;
+    let amplification = angle_error_amplification(a, b, c, shots, station, mean_distance);
+    if !amplification.is_finite() || amplification > DANGER_CIRCLE_REJECT_AMPLIFICATION {
+        return Err(format!(
+            "danger circle: one-arcsecond angle error amplified {:.1}x (limit {:.0}x)",
+            amplification, DANGER_CIRCLE_REJECT_AMPLIFICATION
+        ));
+    }
+    let orientation_deg = (azimuth(station, a) - shots[0].direction_deg).rem_euclid(360.0);
+    Ok(ThreePointResult {
+        station,
+        orientation_deg,
+        subtended_deg: angles,
+        amplification,
+    })
+}
+
+fn angle_error_amplification(
+    a: (f64, f64),
+    b: (f64, f64),
+    c: (f64, f64),
+    shots: &[ResectionShot],
+    station: (f64, f64),
+    mean_distance: f64,
+) -> f64 {
+    let one_arcsecond_deg = 1.0 / 3_600.0;
+    let one_arcsecond_rad = one_arcsecond_deg.to_radians();
+    let reference = mean_distance * one_arcsecond_rad;
+    if !reference.is_finite() || reference <= 0.0 {
+        return f64::INFINITY;
+    }
+    let mut worst = 0.0_f64;
+    for i in 0..3 {
+        for sign in [-1.0, 1.0] {
+            let mut directions = [
+                shots[0].direction_deg,
+                shots[1].direction_deg,
+                shots[2].direction_deg,
+            ];
+            directions[i] += sign * one_arcsecond_deg;
+            let angles = match subtended_from_directions(
+                a,
+                b,
+                c,
+                directions[0],
+                directions[1],
+                directions[2],
+            ) {
+                Ok(angles) => angles,
+                Err(_) => return f64::INFINITY,
+            };
+            let perturbed = match resection_three_point(a, b, c, angles) {
+                Ok(point) => point,
+                Err(_) => return f64::INFINITY,
+            };
+            worst = worst.max((perturbed.0 - station.0).hypot(perturbed.1 - station.1));
+        }
+    }
+    worst / reference
+}
+
+fn azimuth(from: (f64, f64), to: (f64, f64)) -> f64 {
+    (to.0 - from.0)
+        .atan2(to.1 - from.1)
+        .to_degrees()
+        .rem_euclid(360.0)
 }
 
 /// Unsigned angle (degrees, `[0,180]`) at vertex `v` of the wedge `p1–v–p2`.
@@ -342,6 +488,54 @@ mod tests {
         let p: (f64, f64) = (cen.0 + rad * th.cos(), cen.1 + rad * th.sin());
         let ang = [angle_at(p, b, c), angle_at(p, c, a), angle_at(p, a, b)];
         assert!(resection_three_point(a, b, c, ang).is_err(), "should flag danger circle");
+    }
+
+    #[test]
+    fn three_point_shots_keeps_reflex_angle_outside_triangle() {
+        let a = (0.0, 0.0);
+        let b = (1000.0, 0.0);
+        let c = (500.0, 900.0);
+        let p = (500.0, 1300.0);
+        let known = [a, b, c];
+        let shots: Vec<ResectionShot> = known
+            .iter()
+            .enumerate()
+            .map(|(i, &known)| {
+                let (direction_deg, _) = az_dist(p, known);
+                ResectionShot {
+                    known,
+                    direction_deg,
+                    distance: None,
+                    name: format!("P{}", i + 1),
+                }
+            })
+            .collect();
+        let solved = resection_three_point_shots(&shots).expect("outside-triangle solution");
+        assert!(close(solved.station.0, p.0, 1e-6));
+        assert!(close(solved.station.1, p.1, 1e-6));
+        assert!(solved.subtended_deg.iter().any(|&angle| angle > 180.0));
+        assert!(solved.amplification < DANGER_CIRCLE_WARN_AMPLIFICATION);
+    }
+
+    #[test]
+    fn three_point_shots_rejects_danger_amplification() {
+        let a = (0.0, 0.0);
+        let b = (1000.0, 0.0);
+        let c = (500.0, 866.025_403_8);
+        let centre = (500.0, 288.675_134_6);
+        let radius = (a.0 - centre.0).hypot(a.1 - centre.1);
+        let theta = 200f64.to_radians();
+        let p = (centre.0 + radius * theta.cos(), centre.1 + radius * theta.sin());
+        let shots: Vec<ResectionShot> = [a, b, c]
+            .into_iter()
+            .map(|known| ResectionShot {
+                known,
+                direction_deg: az_dist(p, known).0,
+                distance: None,
+                name: "CP".into(),
+            })
+            .collect();
+        assert!(resection_three_point_shots(&shots).is_err());
     }
 
     #[test]

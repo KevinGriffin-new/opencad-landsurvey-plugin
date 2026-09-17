@@ -461,22 +461,35 @@ fn cmd_resect(args: &[String]) -> Result<String, String> {
             r.orientation_deg, r.scale, r.rms
         );
         (r.station, cap)
-    } else if shots.len() == 3 {
-        // Angle-only Tienstra. Subtended angles at P from the three readings.
-        let a = shots[0].known;
-        let b = shots[1].known;
-        let c = shots[2].known;
-        let sep = |x: f64, y: f64| (x - y).rem_euclid(360.0).min((y - x).rem_euclid(360.0));
-        let (ra, rb, rc) = (shots[0].direction_deg, shots[1].direction_deg, shots[2].direction_deg);
-        let ang = [sep(rb, rc), sep(rc, ra), sep(ra, rb)]; // [∠BPC, ∠CPA, ∠APB]
-        let p = resection::resection_three_point(a, b, c, ang).map_err(|e| e.to_string())?;
+    } else if shots.len() == 3 && with_dist == 0 {
+        // Angle-only Tienstra. Preserve the directed/reflex subtended angle
+        // selected by the control-triangle orientation and report the
+        // danger-circle conditioning before drawing.
+        let r = resection::resection_three_point_shots(&shots)?;
         report.push_str(&format!(
             "  method        : angle-only three-point (Tienstra)\n\
              \u{20}\u{20}station (E,N) : {:.4}, {:.4}\n\
-             \u{20}\u{20}subtended     : BPC {:.4}\u{b0}, CPA {:.4}\u{b0}, APB {:.4}\u{b0}",
-            p.0, p.1, ang[0], ang[1], ang[2]
+             \u{20}\u{20}orientation   : {:.4}\u{b0}  (grid azimuth = reading + orientation)\n\
+             \u{20}\u{20}subtended     : BPC {:.4}\u{b0}, CPA {:.4}\u{b0}, APB {:.4}\u{b0}\n\
+             \u{20}\u{20}amplification  : {:.1}x{}",
+            r.station.0,
+            r.station.1,
+            r.orientation_deg,
+            r.subtended_deg[0],
+            r.subtended_deg[1],
+            r.subtended_deg[2],
+            r.amplification,
+            if r.amplification > resection::DANGER_CIRCLE_WARN_AMPLIFICATION {
+                "  <-- WARNING: near danger circle"
+            } else {
+                ""
+            }
         ));
-        (p, "angle-only three-point (Tienstra)".to_string())
+        let cap = format!(
+            "angle-only three-point \u{b7} orient {:.3}\u{b0} \u{b7} amplification {:.1}x",
+            r.orientation_deg, r.amplification
+        );
+        (r.station, cap)
     } else {
         return Err(format!(
             "need >=2 distance shots (combined) or exactly 3 angle shots (three-point); \

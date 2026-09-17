@@ -46,11 +46,14 @@ pub fn azimuth_to_bearing(azimuth_deg: f64) -> String {
 
 /// Split decimal degrees into (degrees, minutes, seconds).
 fn to_dms(deg: f64) -> (i64, i64, f64) {
-    let d = deg.trunc() as i64;
-    let min_full = (deg - d as f64) * 60.0;
-    let m = min_full.trunc() as i64;
-    let s = (min_full - m as f64) * 60.0;
-    (d, m, s)
+    // Round in integer centiseconds before splitting the fields.  Splitting
+    // first lets a value such as 29°59'59.999" format as 29°59'60.00".
+    let total_centiseconds = (deg * 360_000.0).round() as i64;
+    let d = total_centiseconds / 360_000;
+    let rem = total_centiseconds % 360_000;
+    let m = rem / 6_000;
+    let seconds_centiseconds = rem % 6_000;
+    (d, m, seconds_centiseconds as f64 / 100.0)
 }
 
 #[cfg(test)]
@@ -80,5 +83,11 @@ mod tests {
         assert!(azimuth_to_bearing(225.0).ends_with("W"));
         assert!(azimuth_to_bearing(315.0).starts_with("N 45"));
         assert!(azimuth_to_bearing(315.0).ends_with("W"));
+    }
+
+    #[test]
+    fn dms_rounding_carries_seconds_into_minutes() {
+        let almost_thirty = 29.0 + 59.0 / 60.0 + 59.999 / 3_600.0;
+        assert_eq!(azimuth_to_bearing(almost_thirty), "N 30\u{b0}00'00.00\" E");
     }
 }
