@@ -523,7 +523,7 @@ mod tests {
         let b = (1000.0, 0.0);
         let c = (500.0, 866.025_403_8);
         let centre = (500.0, 288.675_134_6);
-        let radius = (a.0 - centre.0).hypot(a.1 - centre.1);
+        let radius: f64 = (a.0 - centre.0).hypot(a.1 - centre.1);
         let theta = 200f64.to_radians();
         let p = (centre.0 + radius * theta.cos(), centre.1 + radius * theta.sin());
         let shots: Vec<ResectionShot> = [a, b, c]
