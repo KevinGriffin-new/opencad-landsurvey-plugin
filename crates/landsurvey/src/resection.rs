@@ -519,10 +519,10 @@ mod tests {
 
     #[test]
     fn three_point_shots_rejects_danger_amplification() {
-        let a = (0.0, 0.0);
-        let b = (1000.0, 0.0);
-        let c = (500.0, 866.025_403_8);
-        let centre = (500.0, 288.675_134_6);
+        let a: (f64, f64) = (0.0, 0.0);
+        let b: (f64, f64) = (1000.0, 0.0);
+        let c: (f64, f64) = (500.0, 866.025_403_8);
+        let centre: (f64, f64) = (500.0, 288.675_134_6);
         let radius: f64 = (a.0 - centre.0).hypot(a.1 - centre.1);
         let theta = 200f64.to_radians();
         let p = (centre.0 + radius * theta.cos(), centre.1 + radius * theta.sin());
