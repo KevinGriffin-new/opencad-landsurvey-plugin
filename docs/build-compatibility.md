@@ -41,12 +41,18 @@ python .github/scripts/windows_smoke.py --host path/to/published-portable.exe
 ## Updating the host pin
 
 The re-pin workflow runs `record_host_build.py --tag <release-tag>` after
-rewriting dependencies. This reads the successful release run's compiler output,
-checks for one unambiguous compiler version, records the checksummed Windows
-asset, and refreshes the toolchain. Missing logs, ambiguous successful runs,
-mixed compilers or missing asset checksums stop the update; they never fall back
-to today's stable compiler. This deliberately requires review when upstream
-changes its release format or historical logs have expired.
+rewriting dependencies. It finds the release run that published the Windows
+portable asset — the run whose lifetime spans the asset's upload time, since a
+scheduled Weekly release starts on main *before* it commits and tags the
+release, and a retry re-uploads with `--clobber` from whatever commit main is
+on — requires that run's `native / build-windows` and `native / verify` jobs to
+have passed (an unrelated job such as the web bundle may have failed), reads its
+compiler output, checks for one unambiguous compiler version, records the
+checksummed asset, and refreshes the toolchain. Missing logs, zero or several
+candidate runs, failed native jobs, mixed compilers or missing asset checksums
+stop the update; they never fall back to today's stable compiler. This
+deliberately requires review when upstream changes its release format or
+historical logs have expired.
 
 The host record and toolchain travel with the dependency pin in the re-pin commit.
 The current compatibility target is v2026.36, not whatever happens to be on Studio
