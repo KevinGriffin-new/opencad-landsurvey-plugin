@@ -4,7 +4,7 @@ import tomllib
 
 import pytest
 from build_metadata import generate, validate
-from record_host_build import compiler_from_log, write_host_record
+from record_host_build import compiler_from_log, select_release_run, write_host_record
 from windows_smoke import check_replies
 import repin_gates as gates
 
@@ -68,3 +68,46 @@ def test_host_record_is_written_with_lf_endings(tmp_path):
     assert json.loads((tmp_path / "host-build.json").read_text()) == host
     toolchain = tomllib.loads((tmp_path / "rust-toolchain.toml").read_text())
     assert toolchain["toolchain"]["channel"] == host["rustc_version"].split()[1]
+
+
+def _run(id, name, created, updated):
+    return {"id": id, "name": name, "created_at": created, "updated_at": updated}
+
+
+def _jobs(**conclusions):
+    return [{"name": k.replace("__", " / ").replace("_", "-"), "conclusion": v} for k, v in conclusions.items()]
+
+
+def test_release_run_is_the_one_that_uploaded_the_asset():
+    # v2026.36: a manual dispatch tagged the release, then the scheduled run
+    # rebuilt on the already-released commit and re-uploaded with --clobber.
+    # The published bytes came from the second run.
+    runs = [_run(34033142114, "Weekly release", "2026-09-06T12:27:17Z", "2026-09-06T12:52:00Z"),
+            _run(34041622155, "Weekly release", "2026-09-06T15:13:22Z", "2026-09-06T15:38:00Z"),
+            _run(34045281214, "Welcome new issues", "2026-09-06T15:13:22Z", "2026-09-06T15:38:00Z")]
+    ok = _jobs(native__build_windows="success", native__verify="success")
+    jobs = {34033142114: ok, 34041622155: ok}
+    assert select_release_run(runs, jobs, "2026-09-06T15:35:51Z")["id"] == 34041622155
+
+
+def test_release_run_found_when_scheduled_run_predates_its_own_tag():
+    # v2026.37: one scheduled run started on the parent commit, created the
+    # release commit + tag, published every native asset, then failed only on
+    # the web bundle. No run is filed under the tagged commit at all.
+    runs = [_run(34767008500, "Weekly release", "2026-09-13T15:54:50Z", "2026-09-13T16:14:13Z")]
+    jobs = {34767008500: _jobs(native__build_windows="success", native__verify="success", web__build="failure")}
+    assert select_release_run(runs, jobs, "2026-09-13T16:13:52Z")["id"] == 34767008500
+
+
+def test_release_run_rejected_when_native_jobs_failed():
+    runs = [_run(1, "Weekly release", "2026-09-13T15:54:50Z", "2026-09-13T16:14:13Z")]
+    jobs = {1: _jobs(native__build_windows="success", native__verify="failure")}
+    with pytest.raises(ValueError, match="native / verify"):
+        select_release_run(runs, jobs, "2026-09-13T16:13:52Z")
+
+
+def test_release_run_missing_when_no_run_spans_the_upload():
+    runs = [_run(1, "Weekly release", "2026-09-13T15:54:50Z", "2026-09-13T16:14:13Z")]
+    jobs = {1: _jobs(native__build_windows="success", native__verify="success")}
+    with pytest.raises(ValueError, match=r"found \[\]"):
+        select_release_run(runs, jobs, "2026-09-13T17:00:00Z")
