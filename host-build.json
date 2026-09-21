@@ -1,8 +1,8 @@
 {
-  "tag": "v2026.37",
-  "commit": "a43fb253f64e157c6eec01b82c437968a1564c98",
+  "tag": "v2026.38",
+  "commit": "0d023d267bc5b7afeca3b54e98875b0efd4f3926",
   "rustc_version": "rustc 1.98.1 (48a229cea 2026-09-01)",
-  "release_run": 34767008500,
-  "windows_asset": "OpenCADStudio-v2026.37-windows-x86_64-portable.exe",
-  "windows_sha256": "69233b5816142517c199ad497b6fd45019bbdfd3a2d4948c599f49116e01fe8a"
+  "release_run": 35520566139,
+  "windows_asset": "OpenCADStudio-v2026.38-windows-x86_64-portable.exe",
+  "windows_sha256": "9fe0d0c7795a9aa64b5ca5ca242fd42d87d84de6ffe03b08c3265f6c9d697f99"
 }

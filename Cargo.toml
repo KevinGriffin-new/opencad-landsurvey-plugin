@@ -1,6 +1,6 @@
 [package]
 name = "opencad-landsurvey-plugin"
-version = "0.4.18"
+version = "0.4.19"
 edition = "2021"
 description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
 license = "GPL-3.0-only"
@@ -11,15 +11,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
-# Pinned to the v2026.37 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "a43fb253f64e157c6eec01b82c437968a1564c98", features = ["host"] }
+# Pinned to the v2026.38 RELEASE TAG commit (the MSI host) so contract types match.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "0d023d267bc5b7afeca3b54e98875b0efd4f3926", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
 # records, so it names `acadrust` types directly. It must resolve to the *same*
 # build of acadrust as the host, or the types crossing the plugin boundary are
 # not the same types (approach B: same toolchain + dependency versions).
 #
-# Match the v2026.37 release's acadrust EXACTLY — same URL, same rev — read out of
+# Match the v2026.38 release's acadrust EXACTLY — same URL, same rev — read out of
 # THAT tag's Cargo.lock, never from whatever `main` happens to be. The crate has
 # moved twice: HakanSeven12/acadrust -> OpenAEC-Foundation/acadifc (host v0.8.7)
 # -> HakanSeven12/cadcodec (host v0.9.5), always as the `acadrust` package.
@@ -35,7 +35,7 @@ ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = 
 # commit, and writing the expanded form here really does lock two acadrusts.
 # `gate-source` in the re-pin workflow compares the spelling; `gate-abi` then
 # checks the lockfile resolved exactly one.
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "6f3711809e39e9ffdf16a63086079b6475d97175", features = ["serde"] }
+acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "5b682ed", features = ["serde"] }
 
 # Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
 landsurvey = { path = "crates/landsurvey" }
