@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acadrust"
 version = "0.5.5"
-source = "git+https://github.com/HakanSeven12/cadcodec.git?rev=6f3711809e39e9ffdf16a63086079b6475d97175#6f3711809e39e9ffdf16a63086079b6475d97175"
+source = "git+https://github.com/HakanSeven12/cadcodec.git?rev=5b682ed#5b682ed66ea2c89be8142c8dd83d83774fc3de08"
 dependencies = [
  "ahash 0.8.12",
  "anyhow",
@@ -585,7 +585,7 @@ dependencies = [
 [[package]]
 name = "ocs_plugin_api"
 version = "0.2.1"
-source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=a43fb253f64e157c6eec01b82c437968a1564c98#a43fb253f64e157c6eec01b82c437968a1564c98"
+source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=0d023d267bc5b7afeca3b54e98875b0efd4f3926#0d023d267bc5b7afeca3b54e98875b0efd4f3926"
 dependencies = [
  "acadrust",
  "bincode",
@@ -610,7 +610,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opencad-landsurvey-plugin"
-version = "0.4.18"
+version = "0.4.19"
 dependencies = [
  "acadrust",
  "landsurvey",
