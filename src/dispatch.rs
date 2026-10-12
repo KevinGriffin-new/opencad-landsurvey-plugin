@@ -15,6 +15,8 @@ use ocs_plugin_api::host::HostApi;
 
 
 use landsurvey::surface::{self, Surface};
+
+use crate::landxml_draw;
 use landsurvey::{cogo, landxml, plan, pnezd, resection, transform, viz};
 
 /// XDATA application carrying survey metadata on a `Point` entity.
@@ -29,6 +31,14 @@ pub const XDATA_PLAN: &str = "LANDSURVEY_PLAN";
 /// Record values: `[String(surface_name), String(kind)]` where `kind` is one of
 /// `TIN`, `CUTFILL`, `LABEL`.
 pub const XDATA_SURFACE: &str = "LANDSURVEY_SURFACE";
+
+/// XDATA application tagging a parcel boundary (LandXML `<Parcel>`).
+/// Record values: `[String(name), String(description)]`.
+pub const XDATA_PARCEL: &str = "LANDSURVEY_PARCEL";
+
+/// XDATA application tagging a plan feature (LandXML `<PlanFeature>`).
+/// Record values: `[String(name), String(description)]`.
+pub const XDATA_FEATURE: &str = "LANDSURVEY_FEATURE";
 
 /// Default world-unit height for imported plan labels (the source JSON carries
 /// no text height).
@@ -54,7 +64,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         "LS_HELLO" => {
             host.push_info(
                 "Land Survey plugin ready. Points: LS_PNEZD, LS_LIST, LS_AUTOLABEL. \
-                 Import: LS_IMPORTPLAN, LS_LANDXML. \
+                 Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
                  See PLUGIN.md for usage.",
@@ -90,6 +100,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         // import to this plugin (per OpenCADStudio issue #157).
         "LS_LANDXML" | "LANDXMLIMPORT" => {
             import_landxml(host, cmd);
+            true
+        }
+        "LS_LANDXMLOUT" => {
+            export_landxml(host, cmd);
             true
         }
         "LS_DATUM" => {
@@ -209,11 +223,35 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
         return;
     }
 
+    host.push_undo("LS_PNEZD import");
+    let (added, total) = draw_survey_points(host, &outcome.points, detail);
+
+    host.bump_geometry();
+    host.set_dirty();
+    let skipped = if outcome.skipped > 0 {
+        format!(", {} line(s) skipped", outcome.skipped)
+    } else {
+        String::new()
+    };
+    host.push_output(&format!(
+        "LS_PNEZD: imported {added} labeled point(s){skipped}, grouped by code. \
+         {total} this session."
+    ));
+}
+
+/// Draw survey points as `Point` entities on per-code layers (`LS-PT-<CODE>`),
+/// tagged with `LANDSURVEY_POINT` XDATA (number + description) and labelled
+/// unless `LS_AUTOLABEL OFF`. Returns `(added, total imported this session)`.
+fn draw_survey_points(
+    host: &mut dyn HostApi,
+    points: &[pnezd::PnezdPoint],
+    detail: bool,
+) -> (usize, usize) {
     // Label/marker sizing follows MicroSurvey MSannotate proportions: a SMALL
     // precise marker with the point number hugging it (~half a text-height
     // away). The number — not the marker — is the prominent element. Text
     // height scales to the survey extent so it stays legible at zoom-extents.
-    let h = label_height(&outcome.points);
+    let h = label_height(points);
     let marker = {
         let header = &mut host.document_mut().header;
         if header.point_display_mode == 0 {
@@ -228,12 +266,10 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
     // Hug the marker: clear its arm (~half the display size) plus a small gap,
     // matching MSannotate's ~0.47×H point-number offset for a small marker.
     let off = marker * 0.5 + h * 0.3;
-    let auto_label =
-        !crate::state::state().suppress_labels;
+    let auto_label = !crate::state::state().suppress_labels;
 
-    host.push_undo("LS_PNEZD import");
     let mut added = 0usize;
-    for p in &outcome.points {
+    for p in points {
         let layer = code_layer(p.code());
         // World mapping: X = Easting, Y = Northing, Z = Elevation.
         let mut pt =
@@ -253,23 +289,9 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
         added += 1;
     }
 
-    let total = {
-        let mut st = crate::state::state();
-        st.imported += added;
-        st.imported
-    };
-
-    host.bump_geometry();
-    host.set_dirty();
-    let skipped = if outcome.skipped > 0 {
-        format!(", {} line(s) skipped", outcome.skipped)
-    } else {
-        String::new()
-    };
-    host.push_output(&format!(
-        "LS_PNEZD: imported {added} labeled point(s){skipped}, grouped by code. \
-         {total} this session."
-    ));
+    let mut st = crate::state::state();
+    st.imported += added;
+    (added, st.imported)
 }
 
 /// `LS_AUTOLABEL [ON|OFF]` — toggle whether `LS_PNEZD` draws point-number
@@ -539,56 +561,469 @@ fn build_surface(host: &mut dyn HostApi, cmd: &str) {
     ));
 }
 
-/// `LS_LANDXML <path>` (and the host's `LANDXMLIMPORT` verb) — import LandXML
-/// TIN surface(s) as `Mesh` entities. Per OpenCADStudio issue #157: the entity
-/// type is `Mesh`; `<P>` is `northing easting [elev]` → world X=E/Y=N/Z=Z; units
-/// are imported as-is; invisible `<F i="1">` faces are skipped — all handled in
-/// the engine parser (`landxml`). Each surface is drawn on `LS-TIN-<NAME>`,
-/// tagged `LANDSURVEY_SURFACE`, and retained by name for LS_VOLUME / LS_DATUM.
+/// LandXML content kinds, for the `LS_LANDXML` / `LS_LANDXMLOUT` filters.
+/// `alignments` covers their profiles and cross sections.
+const LANDXML_KINDS: [&str; 5] = ["points", "parcels", "features", "surfaces", "alignments"];
+
+/// Split trailing keywords (case-insensitive, any order) off a command's
+/// argument string; the remainder is a path, which may contain spaces.
+fn peel_keywords<'a>(rest: &'a str, keywords: &[&str]) -> (&'a str, Vec<String>) {
+    let mut path = rest.trim();
+    let mut found = Vec::new();
+    while let Some(idx) = path.rfind(char::is_whitespace) {
+        let word = path[idx + 1..].to_ascii_lowercase();
+        if !keywords.contains(&word.as_str()) {
+            break;
+        }
+        found.push(word);
+        path = path[..idx].trim_end();
+    }
+    (path.trim_matches('"'), found)
+}
+
+/// `LS_LANDXML <file.xml> [points] [parcels] [features] [surfaces]
+/// [alignments] [preview]` (and the host's `LANDXMLIMPORT` verb, OpenCADStudio
+/// #157) — import LandXML COGO points (as Land Survey points, like
+/// `LS_PNEZD`), parcels (closed LWPolylines on `LS-PARCEL`, labelled with name
+/// and area on `LS-PARCEL-LABEL`), plan features (LWPolylines on
+/// `LS-FEATURE`), TIN surfaces (`Mesh` on `LS-TIN-<name>`, kept for
+/// `LS_VOLUME` / `LS_DATUM`) and alignments (stationed centrelines, with
+/// profile and cross-section views drawn below the plan). Naming kinds
+/// imports only those; `preview` reports without drawing. Each parcel's area
+/// computed from its lines and arcs is checked against the file's `area`.
 fn import_landxml(host: &mut dyn HostApi, cmd: &str) {
-    let arg = first_arg(cmd);
-    if arg.is_empty() {
-        host.push_info("Usage: LS_LANDXML <path-to-surface.xml>  (LandXML TIN surface)");
+    const USAGE: &str = "Usage: LS_LANDXML <file.xml> [points] [parcels] [features] \
+                         [surfaces] [alignments] [preview]";
+    let mut keywords = LANDXML_KINDS.to_vec();
+    keywords.push("preview");
+    let (path, flags) = peel_keywords(first_arg(cmd), &keywords);
+    if path.is_empty() {
+        host.push_info(USAGE);
         return;
     }
-    let text = match fs::read_to_string(arg) {
+    let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            host.push_error(&format!("LS_LANDXML: cannot read \"{arg}\": {e}"));
+            host.push_error(&format!("LS_LANDXML: cannot read \"{path}\": {e}"));
             return;
         }
     };
     if !landxml::looks_like_landxml(&text) {
-        host.push_error(&format!("LS_LANDXML: \"{arg}\" does not look like LandXML."));
+        host.push_error(&format!("LS_LANDXML: \"{path}\" does not look like LandXML."));
         return;
     }
-    let surfaces = landxml::read_surfaces(&text);
-    if surfaces.is_empty() {
-        host.push_error(&format!("LS_LANDXML: no TIN surface found in \"{arg}\"."));
+    let preview = flags.iter().any(|f| f == "preview");
+    let any_kind = flags.iter().any(|f| f != "preview");
+    let want = |k: &str| !any_kind || flags.iter().any(|f| f == k);
+
+    let mut doc = landxml::read_document(&text);
+    if !want("points") {
+        doc.points.clear();
+    }
+    if !want("parcels") {
+        doc.parcels.clear();
+    }
+    if !want("features") {
+        doc.features.clear();
+    }
+    if !want("surfaces") {
+        doc.surfaces.clear();
+    }
+    if !want("alignments") {
+        doc.alignments.clear();
+    }
+    if doc.points.is_empty()
+        && doc.parcels.is_empty()
+        && doc.features.is_empty()
+        && doc.surfaces.is_empty()
+        && doc.alignments.is_empty()
+    {
+        host.push_error(&format!(
+            "LS_LANDXML: no COGO points, parcels, plan features, TIN surfaces or alignments \
+             found in \"{path}\"."
+        ));
         return;
     }
 
-    host.push_undo("LS_LANDXML import");
-    let mut total_tris = 0usize;
-    let mut names: Vec<String> = Vec::new();
-    for ns in &surfaces {
-        let layer = format!("LS-TIN-{}", ns.name);
-        let mesh = mesh_from_surface(&ns.surface);
-        tag_surface(host, EntityType::Mesh(mesh), &layer, &ns.name, "TIN");
-        total_tris += ns.surface.triangles.len();
-        names.push(ns.name.clone());
-        // Retain for LS_VOLUME / LS_DATUM by name (same as LS_SURFACE).
-        let mut st = crate::state::state();
-        st.put_surface(&ns.name, ns.surface.clone());
+    // Parcels whose lines and arcs don't enclose the area the file declares.
+    let area_mismatch: Vec<String> = doc
+        .parcels
+        .iter()
+        .filter_map(|p| {
+            let declared = p.area?;
+            let got = landxml::chain_area(&p.segments);
+            ((got - declared).abs() > 1e-4 * declared.abs().max(1.0))
+                .then(|| format!("{} ({got:.3} vs {declared:.3})", p.name))
+        })
+        .collect();
+    let units = match &doc.units {
+        Some(u) => format!(
+            "{} ({})",
+            if u.linear_unit.is_empty() { "?" } else { &u.linear_unit },
+            if u.metric { "metric" } else { "imperial" }
+        ),
+        None => "not declared".to_string(),
+    };
+    let summary = format!(
+        "{} point(s), {} parcel(s), {} plan feature(s), {} surface(s), {} alignment(s) \
+         ({} profile(s), {} cross section(s)); units {units}",
+        doc.points.len(),
+        doc.parcels.len(),
+        doc.features.len(),
+        doc.surfaces.len(),
+        doc.alignments.len(),
+        doc.alignments.iter().map(|a| a.profiles.len()).sum::<usize>(),
+        doc.alignments.iter().map(|a| a.cross_sections.len()).sum::<usize>(),
+    );
+
+    if preview {
+        host.push_output(&format!("LS_LANDXML preview \"{path}\": {summary}."));
+    } else {
+        host.push_undo("LS_LANDXML import");
+        import_landxml_points(host, &doc.points);
+        import_landxml_parcels(host, &doc.parcels, doc.units.as_ref());
+        for f in &doc.features {
+            for (verts, closed) in landxml::chain_polylines(&f.segments) {
+                let ent = EntityType::LwPolyline(lwpolyline(&verts, closed));
+                tag_named(host, ent, "LS-FEATURE", XDATA_FEATURE, &f.name, &f.desc);
+            }
+        }
+        if !doc.alignments.is_empty() {
+            // Views go below everything this import put in plan.
+            let mut plan = None;
+            for p in &doc.points {
+                landxml_draw::bbox_add(&mut plan, [p.easting, p.northing]);
+            }
+            let chains = doc.parcels.iter().map(|p| &p.segments).chain(doc.features.iter().map(|f| &f.segments));
+            for s in chains.flatten() {
+                landxml_draw::bbox_add(&mut plan, s.start());
+                landxml_draw::bbox_add(&mut plan, s.end());
+            }
+            let metric = doc.units.as_ref().map_or(true, |u| u.metric);
+            landxml_draw::draw_alignments(host, &doc.alignments, metric, plan);
+        }
+        for ns in &doc.surfaces {
+            let layer = format!("LS-TIN-{}", ns.name);
+            let mesh = mesh_from_surface(&ns.surface);
+            tag_surface(host, EntityType::Mesh(mesh), &layer, &ns.name, "TIN");
+            // Retain for LS_VOLUME / LS_DATUM by name (same as LS_SURFACE).
+            crate::state::state().put_surface(&ns.name, ns.surface.clone());
+        }
+        // Re-export in the units the data came in.
+        crate::state::state().landxml_units = doc.units.clone();
+        host.bump_geometry();
+        host.set_dirty();
+        let names: Vec<&str> = doc.surfaces.iter().map(|s| s.name.as_str()).collect();
+        let tins = if names.is_empty() {
+            String::new()
+        } else {
+            format!(" Surfaces [{}] are available to LS_VOLUME / LS_DATUM.", names.join(", "))
+        };
+        host.push_output(&format!("LS_LANDXML: imported {summary}.{tins}"));
     }
-    host.bump_geometry();
-    host.set_dirty();
-    host.push_output(&format!(
-        "LS_LANDXML: imported {} surface(s) [{}] as Mesh — {total_tris} triangle(s) total. \
-         (Use in LS_VOLUME / LS_DATUM by name.)",
-        surfaces.len(),
-        names.join(", ")
-    ));
+
+    if area_mismatch.is_empty() {
+        if doc.parcels.iter().any(|p| p.area.is_some()) {
+            host.push_output("LS_LANDXML: every parcel's computed area matches the file.");
+        }
+    } else {
+        host.push_error(&format!(
+            "LS_LANDXML: {} parcel area(s) differ from the file: {}",
+            area_mismatch.len(),
+            area_mismatch.join("; ")
+        ));
+    }
+    for w in doc.warnings.iter().take(10) {
+        host.push_info(&format!("LS_LANDXML: {w}"));
+    }
+    if doc.warnings.len() > 10 {
+        host.push_info(&format!("LS_LANDXML: … and {} more warning(s)", doc.warnings.len() - 10));
+    }
+}
+
+/// LandXML COGO points become ordinary Land Survey points. The description
+/// leads with the feature code so `LS-PT-<CODE>` layering still works.
+fn import_landxml_points(host: &mut dyn HostApi, points: &[landxml::CgPoint]) {
+    if points.is_empty() {
+        return;
+    }
+    let pts: Vec<pnezd::PnezdPoint> = points
+        .iter()
+        .map(|p| {
+            let description = if p.desc.is_empty() {
+                p.code.clone()
+            } else if p.code.is_empty() || p.desc.split_whitespace().next() == Some(p.code.as_str()) {
+                p.desc.clone()
+            } else {
+                format!("{} {}", p.code, p.desc)
+            };
+            pnezd::PnezdPoint {
+                number: p.name.clone(),
+                northing: p.northing,
+                easting: p.easting,
+                elevation: p.elevation.unwrap_or(0.0),
+                description,
+            }
+        })
+        .collect();
+    draw_survey_points(host, &pts, false);
+}
+
+/// Parcels become closed LWPolylines (arcs as bulges) on `LS-PARCEL`, tagged
+/// `LANDSURVEY_PARCEL [name, desc]`, labelled on `LS-PARCEL-LABEL` with the
+/// name and area at the parcel's label point (or its area centroid).
+fn import_landxml_parcels(
+    host: &mut dyn HostApi,
+    parcels: &[landxml::Parcel],
+    units: Option<&landxml::Units>,
+) {
+    // One text height for every lot: ~1/80 of the subdivision's extent.
+    let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+    for s in parcels.iter().flat_map(|p| &p.segments) {
+        for q in [s.start(), s.end()] {
+            lo = [lo[0].min(q[0]), lo[1].min(q[1])];
+            hi = [hi[0].max(q[0]), hi[1].max(q[1])];
+        }
+    }
+    let h = ((hi[0] - lo[0]).max(hi[1] - lo[1]) / 80.0).max(0.1);
+
+    for p in parcels {
+        for (verts, closed) in landxml::chain_polylines(&p.segments) {
+            let ent = EntityType::LwPolyline(lwpolyline(&verts, closed));
+            tag_named(host, ent, "LS-PARCEL", XDATA_PARCEL, &p.name, &p.desc);
+        }
+        if p.name.is_empty() {
+            continue;
+        }
+        if let Some(at) = p.center.or_else(|| landxml_draw::chain_centroid(&p.segments)) {
+            let area = p.area.unwrap_or_else(|| landxml::chain_area(&p.segments));
+            let area = landxml_draw::area_text(area, units);
+            landxml_draw::draw_lot_label(host, XDATA_PARCEL, &p.name, &p.desc, &area, at, h);
+        }
+    }
+}
+
+fn lwpolyline(verts: &[(f64, f64, f64)], closed: bool) -> LwPolyline {
+    let mut lw = LwPolyline::new();
+    for &(x, y, bulge) in verts {
+        lw.add_point_with_bulge(Vector2::new(x, y), bulge);
+    }
+    lw.is_closed = closed;
+    lw
+}
+
+/// Add `ent` on `layer`, tagged with an `app` record `[name, desc]`.
+fn tag_named(
+    host: &mut dyn HostApi,
+    mut ent: EntityType,
+    layer: &str,
+    app: &str,
+    name: &str,
+    desc: &str,
+) {
+    ent.common_mut().layer = layer.to_string();
+    let handle = host.add_entity(ent);
+    let mut rec = ExtendedDataRecord::new(app);
+    rec.add_value(XDataValue::String(name.to_string()));
+    rec.add_value(XDataValue::String(desc.to_string()));
+    host.write_record(handle, rec);
+}
+
+/// The `[name, desc]` strings of an `app` record on an entity.
+fn named_tag(e: &EntityType, app: &str) -> Option<(String, String)> {
+    let rec = e.common().extended_data.get_record(app)?;
+    let mut strs = rec.values.iter().filter_map(|v| match v {
+        XDataValue::String(s) => Some(s.clone()),
+        _ => None,
+    });
+    let name = strs.next()?;
+    Some((name, strs.next().unwrap_or_default()))
+}
+
+/// `LS_LANDXMLOUT <file.xml> [points] [parcels] [features] [surfaces]
+/// [metric|imperial]` — write the drawing's Land Survey points, parcels, plan
+/// features and named TIN surfaces as LandXML 1.2.
+///
+/// Parcels are closed LWPolylines tagged by `LS_LANDXML`, plus any closed
+/// LWPolyline on a layer whose name contains PARCEL, LOT, PROPERTY or BOUNDARY
+/// (named `Parcel <n>`). Plan features are the LWPolylines `LS_LANDXML` tagged.
+/// Units default to those of the last LandXML import, else metric.
+fn export_landxml(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_LANDXMLOUT <file.xml> [points] [parcels] [features] \
+                         [surfaces] [alignments] [metric|imperial]";
+    let mut keywords = LANDXML_KINDS.to_vec();
+    keywords.extend(["metric", "imperial"]);
+    let (path, flags) = peel_keywords(first_arg(cmd), &keywords);
+    if path.is_empty() {
+        host.push_info(USAGE);
+        return;
+    }
+    let any_kind = flags.iter().any(|f| LANDXML_KINDS.contains(&f.as_str()));
+    let want = |k: &str| !any_kind || flags.iter().any(|f| f == k);
+
+    let mut doc = landxml::LandXmlDoc {
+        units: crate::state::state().landxml_units.clone(),
+        ..Default::default()
+    };
+    if flags.iter().any(|f| f == "metric") {
+        doc.units = None; // the writer's default
+    } else if flags.iter().any(|f| f == "imperial") {
+        doc.units = Some(landxml::Units {
+            metric: false,
+            linear_unit: "USSurveyFoot".to_string(),
+        });
+    }
+
+    let mut unnamed = 0usize;
+    for e in host.document().entities() {
+        match e {
+            EntityType::Point(p) if want("points") => {
+                if let Some((number, description)) = named_tag(e, XDATA_POINT) {
+                    let code = description.split_whitespace().next().unwrap_or("").to_string();
+                    // A bare code is not repeated as the description.
+                    let desc = if description == code { String::new() } else { description };
+                    doc.points.push(landxml::CgPoint {
+                        name: number,
+                        northing: p.location.y,
+                        easting: p.location.x,
+                        elevation: Some(p.location.z),
+                        code,
+                        desc,
+                    });
+                }
+            }
+            EntityType::LwPolyline(pl) => {
+                let verts: Vec<(f64, f64, f64)> = pl
+                    .vertices
+                    .iter()
+                    .map(|v| (v.location.x, v.location.y, v.bulge))
+                    .collect();
+                if let Some((name, desc)) = named_tag(e, XDATA_FEATURE) {
+                    if want("features") {
+                        doc.features.push(landxml::PlanFeature {
+                            name,
+                            desc,
+                            segments: landxml::polyline_segments(&verts, pl.is_closed),
+                        });
+                    }
+                    continue;
+                }
+                let alignment_part = [
+                    landxml_draw::XDATA_ALIGN,
+                    landxml_draw::XDATA_PROFILE,
+                    landxml_draw::XDATA_XSECT,
+                ]
+                .iter()
+                .any(|app| e.common().extended_data.get_record(app).is_some());
+                if alignment_part || !want("parcels") || !pl.is_closed || verts.len() < 3 {
+                    continue;
+                }
+                let (name, desc) = match named_tag(e, XDATA_PARCEL) {
+                    Some(t) => t,
+                    None => {
+                        let layer = e.common().layer.to_ascii_uppercase();
+                        if !["PARCEL", "LOT", "PROPERTY", "BOUNDARY"]
+                            .iter()
+                            .any(|k| layer.contains(k))
+                        {
+                            continue;
+                        }
+                        unnamed += 1;
+                        (format!("Parcel {unnamed}"), String::new())
+                    }
+                };
+                doc.parcels.push(landxml::Parcel {
+                    name,
+                    desc,
+                    area: None, // computed from the boundary by the writer
+                    center: None,
+                    segments: landxml::polyline_segments(&verts, true),
+                });
+            }
+            _ => {}
+        }
+    }
+    // Lot label points: where each parcel's name label now sits, else the
+    // parcel's area centroid.
+    let mut labels: Vec<(String, [f64; 2])> = Vec::new();
+    for e in host.document().entities() {
+        if let EntityType::Text(t) = e {
+            if let Some((name, _)) = named_tag(e, XDATA_PARCEL) {
+                labels.push((name, landxml_draw::lot_label_center(t)));
+            }
+        }
+    }
+    for p in &mut doc.parcels {
+        p.center = labels
+            .iter()
+            .find(|(n, _)| *n == p.name)
+            .map(|(_, c)| *c)
+            .or_else(|| landxml_draw::chain_centroid(&p.segments));
+    }
+    if want("alignments") {
+        doc.alignments = landxml_draw::collect_alignments(host.document());
+    }
+    if want("surfaces") {
+        for name in known_surface_names(host) {
+            if let Ok(surface) = resolve_named_surface(host, &name) {
+                doc.surfaces.push(landxml::NamedSurface { name, surface });
+            }
+        }
+    }
+    if doc.points.is_empty()
+        && doc.parcels.is_empty()
+        && doc.features.is_empty()
+        && doc.surfaces.is_empty()
+        && doc.alignments.is_empty()
+    {
+        host.push_error(
+            "LS_LANDXMLOUT: nothing to export — no Land Survey points, parcels, \
+             plan features, named surfaces or alignments in the drawing.",
+        );
+        return;
+    }
+
+    let (date, time) = utc_now();
+    let xml = landxml::write_document(&doc, &date, &time);
+    match fs::write(path, xml) {
+        Ok(()) => host.push_output(&format!(
+            "LS_LANDXMLOUT: wrote {} point(s), {} parcel(s), {} plan feature(s), \
+             {} surface(s), {} alignment(s) to \"{path}\" ({}).",
+            doc.points.len(),
+            doc.parcels.len(),
+            doc.features.len(),
+            doc.surfaces.len(),
+            doc.alignments.len(),
+            match &doc.units {
+                Some(u) if !u.metric => "imperial",
+                _ => "metric",
+            }
+        )),
+        Err(e) => host.push_error(&format!("LS_LANDXMLOUT: cannot write \"{path}\": {e}")),
+    }
+}
+
+/// Current UTC date and time as `YYYY-MM-DD`, `HH:MM:SS`.
+fn utc_now() -> (String, String) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (
+        format!("{y:04}-{m:02}-{d:02}"),
+        format!("{:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60),
+    )
 }
 
 /// Build an `acadrust` `Mesh` from an engine `Surface`: nodes are `[E, N, Z]`
@@ -1607,6 +2042,7 @@ mod tests {
     use super::*;
     use acadrust::tables::{AppId, TableEntry};
     use acadrust::{CadDocument, DwgReader, DwgWriter};
+    use landsurvey::alignment;
     use std::io::Cursor;
 
     /// Minimal in-memory host: enough of `HostApi` for the dispatch paths the
@@ -1713,13 +2149,355 @@ mod tests {
     /// document has no host, so the writer needs this done by hand for the
     /// EED app references to resolve.
     fn register_ls_app_ids(doc: &mut CadDocument) {
-        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE] {
+        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE] {
             if !doc.app_ids.contains(name) {
                 let mut app = AppId::new(name);
                 app.set_handle(doc.allocate_handle());
                 let _ = doc.app_ids.add(app);
             }
         }
+    }
+
+    /// Imperial LandXML with two points (one via pntRef), a lot whose east side
+    /// is a CCW half circle, a fence plan feature and a one-triangle TIN.
+    const LANDXML_DOC: &str = r#"<?xml version="1.0"?>
+<LandXML version="1.2">
+  <Units><Imperial linearUnit="USSurveyFoot"/></Units>
+  <CgPoints>
+    <CgPoint name="101" code="IP" desc="IP found">100 200 10.5</CgPoint>
+    <CgPoint name="102" code="CB">100 220 9.25</CgPoint>
+  </CgPoints>
+  <Parcels>
+    <Parcel name="Lot 1" area="557.079633">
+      <Center>110 210</Center>
+      <CoordGeom>
+        <Line><Start pntRef="101"/><End pntRef="102"/></Line>
+        <Curve rot="ccw"><Start>100 220</Start><Center>110 220</Center><End>120 220</End></Curve>
+        <Line><Start>120 220</Start><End>120 200</End></Line>
+        <Line><Start>120 200</Start><End>100 200</End></Line>
+      </CoordGeom>
+    </Parcel>
+  </Parcels>
+  <PlanFeatures>
+    <PlanFeature name="FENCE"><CoordGeom><IrregularLine><PntList2D>0 0 0 10 5 10</PntList2D></IrregularLine></CoordGeom></PlanFeature>
+  </PlanFeatures>
+  <Surfaces><Surface name="LXRT"><Definition surfType="TIN">
+    <Pnts><P id="1">0 0 1</P><P id="2">0 10 2</P><P id="3">10 0 3</P></Pnts>
+    <Faces><F>1 2 3</F></Faces>
+  </Definition></Surface></Surfaces>
+</LandXML>"#;
+
+    /// LS_LANDXML imports points, parcels, features and surfaces; LS_LANDXMLOUT
+    /// writes them back out and the result reads back identically. One test,
+    /// because the last-imported LandXML units live in process-global state.
+    #[test]
+    fn landxml_import_export_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("ls_lx_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let src = dir.join("in file.xml"); // a space in the path
+        std::fs::write(&src, LANDXML_DOC).expect("write fixture");
+
+        // preview: reports, draws nothing.
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {} preview", src.display()));
+        assert_eq!(host.doc.entities().count(), 0);
+        assert!(host.log.iter().any(|l| l.contains("2 point(s), 1 parcel(s)")), "{:?}", host.log);
+
+        // A kind filter imports only that kind.
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {} parcels", src.display()));
+        assert!(host.doc.entities().all(|e| !matches!(e, EntityType::Point(_) | EntityType::Mesh(_))));
+
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {}", src.display()));
+        assert!(!host.log.iter().any(|l| l.starts_with("ERROR")), "{:?}", host.log);
+        assert!(host.log.iter().any(|l| l.contains("computed area matches")), "{:?}", host.log);
+
+        let points: Vec<_> = host
+            .doc
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Point(p) => Some((named_tag(e, XDATA_POINT).unwrap(), p.location, e.common().layer.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].0, ("101".to_string(), "IP found".to_string()));
+        assert_eq!((points[0].1.x, points[0].1.y, points[0].1.z), (200.0, 100.0, 10.5));
+        assert_eq!(points[0].2, "LS-PT-IP");
+        // A code with no desc becomes the description.
+        assert_eq!(points[1].0 .1, "CB");
+
+        let parcel = host
+            .doc
+            .entities()
+            .find_map(|e| match e {
+                EntityType::LwPolyline(pl) if e.common().layer == "LS-PARCEL" => Some((pl.clone(), named_tag(e, XDATA_PARCEL))),
+                _ => None,
+            })
+            .expect("parcel polyline");
+        assert!(parcel.0.is_closed);
+        assert_eq!(parcel.0.vertices.len(), 4);
+        assert!((parcel.0.vertices[1].bulge - 1.0).abs() < 1e-12, "half circle");
+        assert_eq!(parcel.1, Some(("Lot 1".to_string(), String::new())));
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Text(t)
+            if t.value == "Lot 1" && e.common().layer == "LS-PARCEL-LABEL")));
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::LwPolyline(_))
+            && named_tag(e, XDATA_FEATURE).is_some_and(|t| t.0 == "FENCE")));
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Mesh(_))));
+
+        // Export (units carried over from the import) and read back.
+        let out = dir.join("out.xml");
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {}", out.display()));
+        assert!(host.log.iter().any(|l| l.contains("(imperial)")), "{:?}", host.log);
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let orig = landxml::read_document(LANDXML_DOC);
+        assert_eq!(back.units, orig.units);
+        assert_eq!(back.points, orig.points);
+        assert_eq!(back.parcels.len(), 1);
+        assert_eq!(back.parcels[0].name, "Lot 1");
+        let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+        for (a, b) in back.parcels[0].segments.iter().zip(&orig.parcels[0].segments) {
+            assert!(close(a.start(), b.start()) && close(a.end(), b.end()));
+            assert!((a.sweep() - b.sweep()).abs() < 1e-12);
+        }
+        assert!((back.parcels[0].area.unwrap() - 557.079633).abs() < 1e-5);
+        assert_eq!(back.features[0].segments, orig.features[0].segments);
+        let tin = back.surfaces.iter().find(|s| s.name == "LXRT").expect("surface exported");
+        assert_eq!(tin.surface.nodes, orig.surfaces[0].surface.nodes);
+
+        // A `metric` flag overrides the carried-over units.
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} points metric", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).unwrap());
+        assert_eq!(back.units.map(|u| u.metric), Some(true));
+        assert!(back.parcels.is_empty() && back.points.len() == 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real Aplitop alignment (lines, arcs, 7 clothoids, a parabolic
+    /// profile) survives LS_LANDXML → drawing → LS_LANDXMLOUT.
+    #[test]
+    fn landxml_alignment_roundtrip_through_drawing() {
+        const XML: &str =
+            include_str!("../crates/landsurvey/tests/fixtures/landxml-alignments/aplitop-1.xml");
+        let dir = std::env::temp_dir().join(format!("ls_lx_al_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let src = dir.join("aplitop.xml");
+        std::fs::write(&src, XML).expect("write fixture");
+
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {} alignments", src.display()));
+        assert!(host.log.iter().any(|l| l.contains("1 alignment(s) (1 profile(s)")), "{:?}", host.log);
+        let on = |layer: &str| host.doc.entities().filter(|e| e.common().layer == layer).count();
+        assert_eq!(on("LS-ALIGN"), 1);
+        assert_eq!(on("LS-PROF-PVI") >= 1, true);
+        assert_eq!(on("LS-PROF-FG"), 1);
+        // Station labels at the geometry points, e.g. the first spiral's TS.
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Text(t) if t.value == "0+049.841")));
+
+        let out = dir.join("out.xml");
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} alignments", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let orig = landxml::read_document(XML);
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (&orig.alignments[0], &back.alignments[0]);
+        assert_eq!((b.name.as_str(), b.sta_start), ("Horizontal", 0.0));
+        assert_eq!(a.segments.len(), b.segments.len());
+        for (x, y) in a.segments.iter().zip(&b.segments) {
+            assert_eq!(std::mem::discriminant(x), std::mem::discriminant(y));
+            assert!((x.length() - y.length()).abs() < 1e-6);
+            for t in [0.25, 0.5, 0.75] {
+                let (p, q) = (x.at(x.length() * t).0, y.at(y.length() * t).0);
+                assert!((p[0] - q[0]).hypot(p[1] - q[1]) < 1e-6);
+            }
+        }
+        let (alignment::ProfileData::Design(p), alignment::ProfileData::Design(q)) =
+            (&a.profiles[0].data, &b.profiles[0].data)
+        else {
+            panic!("design profiles");
+        };
+        assert_eq!(p.len(), q.len());
+        for (u, v) in p.iter().zip(q) {
+            assert!((u.sta - v.sta).abs() < 1e-6 && (u.elev - v.elev).abs() < 1e-6);
+            assert!((u.curve_len - v.curve_len).abs() < 1e-9);
+        }
+    }
+
+    /// Cross sections and a ground profile draw as views and export back.
+    #[test]
+    fn landxml_sections_and_ground_profile_roundtrip() {
+        const XML: &str = r#"<LandXML><Units><Metric linearUnit="meter"/></Units>
+<Alignments><Alignment name="CL" staStart="100">
+ <CoordGeom><Line><Start>0 0</Start><End>0 200</End></Line></CoordGeom>
+ <Profile><ProfSurf name="EG"><PntList2D>100 50 200 52.5 300 51</PntList2D></ProfSurf></Profile>
+ <CrossSects>
+  <CrossSect sta="150"><CrossSectSurf name="Existing"><PntList2D>-20 50 0 51 20 50.5</PntList2D></CrossSectSurf>
+   <CrossSectSurf name="Design" desc="road"><PntList2D>-6 51.2 0 51.32 6 51.2</PntList2D></CrossSectSurf></CrossSect>
+  <CrossSect sta="250"><CrossSectSurf name="Existing"><PntList2D>-20 52 20 51</PntList2D></CrossSectSurf></CrossSect>
+ </CrossSects></Alignment></Alignments></LandXML>"#;
+        let dir = std::env::temp_dir().join(format!("ls_lx_xs_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let src = dir.join("xs.xml");
+        std::fs::write(&src, XML).expect("write");
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {}", src.display()));
+        assert!(host.log.iter().any(|l| l.contains("(1 profile(s), 2 cross section(s))")), "{:?}", host.log);
+        assert_eq!(host.doc.entities().filter(|e| e.common().layer == "LS-XSEC-EG").count(), 2);
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Text(t) if t.value == "STA 0+150.000")));
+
+        let out = dir.join("out.xml");
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} alignments", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let orig = landxml::read_document(XML);
+        let (a, b) = (&orig.alignments[0], &back.alignments[0]);
+        assert_eq!(b.sta_start, 100.0);
+        assert_eq!(a.cross_sections.len(), b.cross_sections.len());
+        for (x, y) in a.cross_sections.iter().zip(&b.cross_sections) {
+            assert_eq!(x.sta, y.sta);
+            assert_eq!(x.surfaces.len(), y.surfaces.len());
+            for (s, t) in x.surfaces.iter().zip(&y.surfaces) {
+                assert_eq!((s.name.as_str(), s.desc.as_str()), (t.name.as_str(), t.desc.as_str()));
+                for (u, v) in s.points.iter().zip(&t.points) {
+                    assert!((u[0] - v[0]).abs() < 1e-9 && (u[1] - v[1]).abs() < 1e-9, "{u:?} {v:?}");
+                }
+            }
+        }
+        let alignment::ProfileData::Surface(eg) = &b.profiles[0].data else {
+            panic!("surface profile")
+        };
+        assert!((eg[1][0] - 200.0).abs() < 1e-9 && (eg[1][1] - 52.5).abs() < 1e-9);
+    }
+
+    /// Lot labels carry name and area; moving the label moves the exported
+    /// label point, and an unlabelled parcel exports its area centroid.
+    #[test]
+    fn landxml_lot_labels() {
+        let dir = std::env::temp_dir().join(format!("ls_lx_lbl_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let src = dir.join("lot.xml");
+        std::fs::write(&src, LANDXML_DOC).expect("write");
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {} parcels", src.display()));
+        // Imperial file: area in square feet and acres.
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Text(t)
+            if t.value == "557 sq ft (0.013 ac)")), "area label");
+
+        // Move the name label 5 east, 3 north.
+        for e in host.doc.entities_mut() {
+            if let EntityType::Text(t) = e {
+                if t.value == "Lot 1" {
+                    t.insertion_point.x += 5.0;
+                    t.insertion_point.y += 3.0;
+                }
+            }
+        }
+        let out = dir.join("out.xml");
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} parcels", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let c = back.parcels[0].center.expect("label point");
+        assert!((c[0] - 215.0).abs() < 1e-9 && (c[1] - 113.0).abs() < 1e-9, "{c:?}");
+
+        // Untagged boundary: centroid of a 30 x 20 rectangle.
+        let mut host = TestHost::new();
+        let rect = [(0.0, 0.0, 0.0), (30.0, 0.0, 0.0), (30.0, 20.0, 0.0), (0.0, 20.0, 0.0)];
+        let mut ent = EntityType::LwPolyline(lwpolyline(&rect, true));
+        ent.common_mut().layer = "LOTS".to_string();
+        host.add_entity(ent);
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} parcels metric", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(back.parcels[0].center, Some([15.0, 10.0]));
+    }
+
+    /// An untagged closed LWPolyline on a property/lot layer exports as a
+    /// parcel; an open one, or one on another layer, does not.
+    #[test]
+    fn landxml_export_untagged_property_boundary() {
+        let mut host = TestHost::new();
+        let square = [(0.0, 0.0, 0.0), (30.0, 0.0, 0.0), (30.0, 20.0, 0.0), (0.0, 20.0, 0.0)];
+        for (layer, closed) in [("PROPERTY_LINE", true), ("PROPERTY_LINE", false), ("ROAD", true)] {
+            let mut ent = EntityType::LwPolyline(lwpolyline(&square, closed));
+            ent.common_mut().layer = layer.to_string();
+            host.add_entity(ent);
+        }
+        let out = std::env::temp_dir().join(format!("ls_lx_prop_{}.xml", std::process::id()));
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} parcels metric", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(back.parcels.len(), 1);
+        assert_eq!(back.parcels[0].name, "Parcel 1");
+        assert!((back.parcels[0].area.unwrap() - 600.0).abs() < 1e-9);
+    }
+
+    /// Opt-in (`LANDXML_SAMPLE`, see the engine test of the same name): the
+    /// real Land Desktop subdivision survives import → drawing → export with
+    /// every lot's area intact.
+    #[test]
+    fn landxml_sample_roundtrip_through_drawing() {
+        let Ok(path) = std::env::var("LANDXML_SAMPLE") else {
+            return;
+        };
+        let mut host = TestHost::new();
+        import_landxml(&mut host, &format!("LS_LANDXML {path} points parcels alignments"));
+        let orig = landxml::read_document(&std::fs::read_to_string(&path).unwrap());
+        if orig.parcels.iter().any(|p| p.area.is_some()) {
+            assert!(host.log.iter().any(|l| l.contains("computed area matches")), "{:?}", host.log);
+        }
+        let out = std::env::temp_dir().join(format!("ls_lx_sample_{}.xml", std::process::id()));
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} points parcels alignments", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(back.points.len(), orig.points.len());
+        assert_eq!(back.parcels.len(), orig.parcels.len());
+        for (b, o) in back.parcels.iter().zip(&orig.parcels) {
+            assert_eq!(b.name, o.name);
+            let (ab, ao) = (landxml::chain_area(&b.segments), landxml::chain_area(&o.segments));
+            assert!((ab - ao).abs() < 1e-6 * ao.max(1.0), "{}: {ab} vs {ao}", o.name);
+        }
+        assert_eq!(back.alignments.len(), orig.alignments.len());
+        for (b, o) in back.alignments.iter().zip(&orig.alignments) {
+            assert_eq!(b.name, o.name);
+            assert!((b.length() - o.length()).abs() < 1e-6, "{}", o.name);
+            assert_eq!(b.profiles.len(), o.profiles.len(), "{}", o.name);
+            for (p, q) in b.profiles.iter().zip(&o.profiles) {
+                let (p, q) = (p.points(), q.points());
+                assert_eq!(p.len(), q.len());
+                assert!(p.iter().zip(&q).all(|(u, v)| (u[0] - v[0]).abs() < 1e-6 && (u[1] - v[1]).abs() < 1e-6));
+            }
+            assert_eq!(b.cross_sections.len(), o.cross_sections.len(), "{}", o.name);
+            for (x, y) in b.cross_sections.iter().zip(&o.cross_sections) {
+                assert_eq!(x.surfaces.len(), y.surfaces.len(), "{} sta {}", o.name, y.sta);
+                for (s, t) in x.surfaces.iter().zip(&y.surfaces) {
+                    assert!(s.points.iter().zip(&t.points).all(|(u, v)| (u[0] - v[0]).abs() < 1e-6 && (u[1] - v[1]).abs() < 1e-6));
+                }
+            }
+        }
+        eprintln!(
+            "sample: {} points, {} parcels, {} alignments, {} profiles, {} sections, {} entities",
+            back.points.len(),
+            back.parcels.len(),
+            back.alignments.len(),
+            back.alignments.iter().map(|a| a.profiles.len()).sum::<usize>(),
+            back.alignments.iter().map(|a| a.cross_sections.len()).sum::<usize>(),
+            host.doc.entities().count()
+        );
+    }
+
+    #[test]
+    fn peel_keywords_keeps_spaced_paths() {
+        let (p, k) = peel_keywords("C:/My Data/a b.xml Points preview", &["points", "preview"]);
+        assert_eq!(p, "C:/My Data/a b.xml");
+        assert_eq!(k, vec!["preview".to_string(), "points".to_string()]);
+        assert_eq!(peel_keywords("\"x y.xml\"", &["points"]).0, "x y.xml");
+    }
+
+    #[test]
+    fn utc_now_formats() {
+        let (d, t) = utc_now();
+        assert_eq!((d.len(), &d[4..5], &d[7..8]), (10, "-", "-"));
+        assert_eq!((t.len(), &t[2..3]), (8, ":"));
+        assert!(d.as_str() >= "2026-01-01");
     }
 
     /// LS_IMPORTPLAN with plat2json `--vectorize trace` output: the chain

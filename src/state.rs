@@ -41,6 +41,9 @@ pub struct LandSurveyState {
     /// When true, `LS_PNEZD` imports points WITHOUT drawing number labels
     /// (toggled by `LS_AUTOLABEL OFF`). Default false = auto-labels on.
     pub suppress_labels: bool,
+    /// Units of the last LandXML import, reused by `LS_LANDXMLOUT` so an
+    /// imperial file round-trips as imperial.
+    pub landxml_units: Option<landsurvey::landxml::Units>,
 }
 
 impl LandSurveyState {

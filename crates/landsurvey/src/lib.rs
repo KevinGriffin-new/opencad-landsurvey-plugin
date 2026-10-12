@@ -5,6 +5,7 @@
 //! for CLI/WASM. Its in-app consumer is the `opencad-landsurvey-plugin` cdylib,
 //! which wraps these functions in ribbon/command/XDATA glue.
 
+pub mod alignment;
 pub mod cogo;
 pub mod dxf;
 pub mod landxml;
