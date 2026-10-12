@@ -3,7 +3,7 @@
 `test_no_app.py` is a black-box regression suite for the published Open CAD
 Studio host. It stages the Windows plugin in an isolated temporary profile and
 drives the host's `--serve` JSON interface. It does not use the user's normal
-plugin directory and does not open the MN-metalica installation.
+plugin directory and does not touch an existing Open CAD Studio installation.
 
 The suite covers:
 
@@ -22,7 +22,7 @@ Run it with a staged package containing `plugin.toml` and
 
 ```powershell
 python field-tests/test_no_app.py `
-  --host C:\path\OpenCADStudio-v2026.36-windows-x86_64-portable.exe `
+  --host C:\path\OpenCADStudio-<tag>-windows-x86_64-portable.exe `
   --package dist `
   --host-record host-build.json `
   --output field-test-results
