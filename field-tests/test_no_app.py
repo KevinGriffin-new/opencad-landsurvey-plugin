@@ -17,10 +17,20 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 from typing import Any, Iterable
+
+# Degrees, minutes, seconds in a bearing label, whatever the label style puts
+# between them: `N 30°00'00.00" E` (plain) or `N30°00'00"E` (MsAnnotate).
+DMS = re.compile(r"(\d+)\s*\u00b0\s*(\d+)\s*'\s*(\d+(?:\.\d+)?)\s*\"")
+
+
+def dms_fields(text: str) -> tuple[int, int, float] | None:
+    m = DMS.search(text)
+    return (int(m.group(1)), int(m.group(2)), float(m.group(3))) if m else None
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -156,6 +166,10 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
                 f"host checksum mismatch: {actual} != {record['windows_sha256']}"
             )
 
+    # The host version the ready banner should report: the release we are
+    # pinned to, when a host record is given.
+    expected_version = record["tag"].lstrip("v") if expected_host else None
+
     checks = Checks()
     with tempfile.TemporaryDirectory(prefix="ocs-land-survey-field-") as temp:
         stage = Path(temp)
@@ -185,7 +199,12 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
             "01-core",
         )
         ready = reply(core, lambda r: r.get("ready") is True, "ready")
-        checks.check("host ready banner", ready.get("version") == "2026.36")
+        checks.check(
+            "host ready banner",
+            ready.get("ready") is True
+            and (expected_version is None or ready.get("version") == expected_version),
+            str(ready),
+        )
         checks.check("plugin loaded by host", "Loaded plugin: Land Survey" in core_err, core_err)
         checks.check(
             "LS_HELLO recognized",
@@ -257,7 +276,11 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
         checks.check("inverse draws line and two labels", first_inverse.get("added") == 3, str(first_inverse))
         inverse_query = entities(inverse)
         texts = entity_texts(inverse_query)
-        checks.check("DMS rounds across minute boundary", any("30" in value and "00'00.00\"" in value for value in texts), str(texts))
+        checks.check(
+            "DMS rounds across minute boundary",
+            any(dms_fields(value) == (30, 0, 0.0) for value in texts),
+            str(texts),
+        )
         checks.check("DMS never emits 60 seconds", all("60\"" not in value for value in texts), str(texts))
         reverse_query = entities(inverse[::-1])
         checks.check("inverse quadrant formatting includes west bearing", any("W" in value for value in entity_texts(reverse_query)), str(entity_texts(reverse_query)))
