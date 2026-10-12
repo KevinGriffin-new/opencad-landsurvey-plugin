@@ -30,9 +30,19 @@ static MANIFEST: PluginManifest = PluginManifest {
     description: "Survey points, PNEZD & LandXML import, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection).",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 50,
-    // Both XDATA applications this plugin writes (see dispatch.rs). Declaring
-    // them lets the host pre-register the APPIDs for DWG/DXF round-trip.
-    xdata_apps: &[dispatch::XDATA_POINT, dispatch::XDATA_PLAN, dispatch::XDATA_SURFACE],
+    // Every XDATA application this plugin writes (see dispatch.rs and
+    // landxml_draw.rs). Declaring them lets the host pre-register the APPIDs
+    // for DWG/DXF round-trip. Mirrored by plugin.toml's `xdata_apps`.
+    xdata_apps: &[
+        dispatch::XDATA_POINT,
+        dispatch::XDATA_PLAN,
+        dispatch::XDATA_SURFACE,
+        dispatch::XDATA_PARCEL,
+        dispatch::XDATA_FEATURE,
+        landxml_draw::XDATA_ALIGN,
+        landxml_draw::XDATA_PROFILE,
+        landxml_draw::XDATA_XSECT,
+    ],
     command_prefixes: &["LS_"],
 };
 

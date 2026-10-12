@@ -110,9 +110,16 @@ dependency five times in seven weeks:
 | v0.8.8 | `{ version = "0.4", features = [...] }`, patch rev-pinned, URL gains `.git` |
 | v0.9.5 | `{ git = ".../cadcodec.git", rev = "...", features = [...] }`, no patch |
 | v0.9.8 | same shape, but the root adds `[patch."…/cadcodec.git"]` redirecting it to `https://git@…/cadcodec.git` at another rev |
+| v2026.39 | the package is **renamed**: `codec = { package = "opencadcodec", git = ".../opencadcodec.git", rev = "..." }` |
 
 Each change broke a gate, and each break was found by a red nightly run — the
-v0.9.5 one blocked nine consecutive nights. v0.9.8 is the one that got through
+v0.9.5 one blocked nine consecutive nights. The v2026.39 rename blocked every
+night from v2026.39 to v2026.41: the gates looked the codec up by the
+dependency key `acadrust` and found nothing (exit 2, a parser gap). They now
+identify the codec by **package name** (`acadrust` or `opencadcodec`) under
+whatever key declares it, and treat a rename between the host and the plugin
+as an escalation (exit 1): a rename changes every `use` in the plugin, so it
+is a source migration, never a pin bump. Plugin 0.4.20 is that migration. v0.9.8 is the one that got through
 the parsers entirely: it broke no reader, it just made every reader answer a
 question that had stopped being the right one. The gates were fixed reactively
 three times because the logic lived in heredocs inside the workflow, where it

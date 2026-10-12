@@ -9,8 +9,8 @@
 //! Layout: profile views stack below the plan, 10× vertical exaggeration;
 //! cross-section views follow below them in rows, 5× vertical exaggeration.
 
-use acadrust::xdata::{ExtendedDataRecord, XDataValue};
-use acadrust::{EntityType, Line, LwPolyline, Text, Vector2, Vector3};
+use codec::xdata::{ExtendedDataRecord, XDataValue};
+use codec::{EntityType, Line, LwPolyline, Text, Vector2, Vector3};
 use ocs_plugin_api::host::HostApi;
 
 use landsurvey::alignment::{
@@ -518,7 +518,7 @@ fn draw_section_views(host: &mut dyn HostApi, a: &Alignment, metric: bool, corne
 
 /// Alignments (centrelines, profiles, cross sections) recovered from tagged
 /// drawing entities, in drawing order.
-pub fn collect_alignments(doc: &acadrust::CadDocument) -> Vec<Alignment> {
+pub fn collect_alignments(doc: &codec::CadDocument) -> Vec<Alignment> {
     let mut out: Vec<Alignment> = Vec::new();
     fn slot<'a>(out: &'a mut Vec<Alignment>, name: &str) -> &'a mut Alignment {
         if let Some(i) = out.iter().position(|a| a.name == name) {

@@ -3,12 +3,19 @@
 The plugin uses the exact compiler recorded in `rust-toolchain.toml`, not
 floating stable. `host-build.json` records the matching host commit, release
 tag, successful release run, full compiler version, and Windows asset checksum.
-For v2026.36, weekly release run 34041622155 reports Rust 1.98.1
-(`48a229cea 2026-09-01`) on Windows, Linux and macOS. Plugin 0.4.17
-targets API 5 and the host's acadrust 0.5.4 build.
+For v2026.41, release run 38160100031 reports Rust 1.99.0
+(`b940084d7 2026-09-28`). Plugin 0.4.20 targets API 7 and the host's
+opencadcodec 0.6.0 build (`8189f83`). Earlier: v2026.36 was Rust 1.98.1
+(`48a229cea 2026-09-01`, run 34041622155), API 5 and acadrust 0.5.4.
+
+The host compares the compiler string and the codec source hash exactly at
+install and at load, so a plugin built for one host release is refused by any
+other. Since v2026.39 the codec is the `opencadcodec` package (imported as
+`codec`); the generated manifest still uses the host's key name
+`acadrust_source` for it.
 
 `build_metadata.py` rejects a stale host pin or mismatched compiler and generates
-`dist/plugin.toml` with the resolved acadrust source from Cargo.lock, compiler
+`dist/plugin.toml` with the resolved codec source from Cargo.lock, compiler
 version, host tag and host commit. The checked-in plugin.toml remains a template.
 Each release binary also has a `.build.json` sidecar recording its native target
 platform and lockfile checksum; the shared manifest stays identical across platforms.
@@ -55,5 +62,5 @@ deliberately requires review when upstream changes its release format or
 historical logs have expired.
 
 The host record and toolchain travel with the dependency pin in the re-pin commit.
-The current compatibility target is v2026.36, not whatever happens to be on Studio
+The current compatibility target is v2026.41, not whatever happens to be on Studio
 main. Passing this test does not claim compatibility with later host releases.

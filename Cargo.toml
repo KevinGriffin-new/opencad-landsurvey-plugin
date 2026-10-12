@@ -1,6 +1,6 @@
 [package]
 name = "opencad-landsurvey-plugin"
-version = "0.4.19"
+version = "0.4.20"
 edition = "2021"
 description = "Land Survey add-on for Open CAD Studio — survey points, PNEZD import, recognized-plan import, and COGO geometry."
 license = "GPL-3.0-only"
@@ -11,31 +11,35 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # The stable contract, with the runtime `host` surface (HostApi / BuiltinPlugin).
-# Pinned to the v2026.38 RELEASE TAG commit (the MSI host) so contract types match.
-ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "0d023d267bc5b7afeca3b54e98875b0efd4f3926", features = ["host"] }
+# Pinned to the v2026.41 RELEASE TAG commit (the MSI host) so contract types match.
+ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "cff240ef71b4d7d0e4832c8d260c5af7f2fe3b17", features = ["host"] }
 
 # This plugin constructs entities (Point / Line / Arc / Circle / Text) and XDATA
-# records, so it names `acadrust` types directly. It must resolve to the *same*
-# build of acadrust as the host, or the types crossing the plugin boundary are
-# not the same types (approach B: same toolchain + dependency versions).
+# records, so it names the host's CAD codec types directly. It must resolve to
+# the *same* build of the codec as the host, or the types crossing the plugin
+# boundary are not the same types (approach B: same toolchain + dependency
+# versions).
 #
-# Match the v2026.38 release's acadrust EXACTLY — same URL, same rev — read out of
+# Match the v2026.41 release's codec EXACTLY — same URL, same rev — read out of
 # THAT tag's Cargo.lock, never from whatever `main` happens to be. The crate has
-# moved twice: HakanSeven12/acadrust -> OpenAEC-Foundation/acadifc (host v0.8.7)
-# -> HakanSeven12/cadcodec (host v0.9.5), always as the `acadrust` package.
+# moved and been renamed: HakanSeven12/acadrust -> OpenAEC-Foundation/acadifc
+# (host v0.8.7) -> HakanSeven12/cadcodec (host v0.9.5), all as the `acadrust`
+# package, then -> HakanSeven12/opencadcodec as the `opencadcodec` package
+# (host v2026.39), which ocs_plugin_api imports under the key `codec`. We use
+# the same key so code reads `codec::…` on both sides of the boundary.
 #
 # This was a crates.io requirement redirected by [patch.crates-io] until host
-# v0.9.5, when ocs_plugin_api itself began depending on acadrust by git. A
+# v0.9.5, when ocs_plugin_api itself began depending on the codec by git. A
 # crates.io patch does not reach a git-sourced dependency, so that arrangement
-# would have resolved two different acadrusts into one graph.
+# would have resolved two different codecs into one graph.
 #
 # The rev below is copied VERBATIM from ocs_plugin_api's own manifest, including
 # its abbreviation. Cargo keys a git source on the literal `?rev=` text, so
 # `rev = "931c4ab"` and `rev = "931c4ab0c590...b139f"` are two sources for one
-# commit, and writing the expanded form here really does lock two acadrusts.
+# commit, and writing the expanded form here really does lock two codecs.
 # `gate-source` in the re-pin workflow compares the spelling; `gate-abi` then
 # checks the lockfile resolved exactly one.
-acadrust = { git = "https://github.com/HakanSeven12/cadcodec.git", rev = "5b682ed", features = ["serde"] }
+codec = { package = "opencadcodec", git = "https://github.com/HakanSeven12/opencadcodec.git", rev = "8189f83", features = ["serde"] }
 
 # Layer-C engine — host-free COGO / PNEZD / plan parsing (std + serde only).
 landsurvey = { path = "crates/landsurvey" }

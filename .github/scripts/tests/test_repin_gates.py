@@ -26,6 +26,10 @@ import repin_gates as rg
 TESTS = Path(__file__).resolve().parent
 HOSTS = TESTS / "fixtures" / "host"
 PLUGINS = TESTS / "fixtures" / "plugin"
+# The plugin manifest as shipped up to v0.4.19: a git-pinned `acadrust`. Tests
+# about acadrust-era host shapes use this frozen copy rather than the live
+# Cargo.toml, which since v0.4.20 declares the renamed opencadcodec package.
+ACADRUST_ERA = PLUGINS / "acadrust-git-Cargo.toml"
 REPO = TESTS.parents[2]  # <repo>/.github/scripts/tests -> <repo>
 
 
@@ -52,6 +56,21 @@ TAGS = {
     "v0.9.8": ("0.4.1", "git@github.com/HakanSeven12/cadcodec", "788eea0161ba9f3eb7ee6569fd8bb52a8207a2ed"),
 }
 
+# The CAD codec era. v2026.36 is the last acadrust host; v2026.39 renamed the
+# package to opencadcodec and imports it under the key `codec` — the shape
+# that stopped the nightly re-pin for v2026.39, v2026.40.1 and v2026.41.
+#                    package         version  repo slug                                 lock rev
+CODEC_TAGS = {
+    "v2026.36": ("acadrust", "0.5.4", "git@github.com/HakanSeven12/cadcodec",
+                 "5b56571a190e7a17c8f12d36390d2938b0fb72f7"),
+    "v2026.39": ("opencadcodec", "0.5.5", "github.com/HakanSeven12/opencadcodec",
+                 "42b44d2343e9925cff8a0c9e94c1d1c5ae8541c7"),
+    "v2026.40.1": ("opencadcodec", "0.5.5", "github.com/HakanSeven12/opencadcodec",
+                   "fe69506cb99dea6f4c4a73b690a27fdf04403ea0"),
+    "v2026.41": ("opencadcodec", "0.6.0", "github.com/HakanSeven12/opencadcodec",
+                 "8189f833574c544fc57a1d773591014c3a5907c9"),
+}
+
 # How each tag spells [dependencies].acadrust in its Cargo.toml. The v0.8.8 row
 # is the shape that broke the grep-based gate; the v0.9.5 row is the shape that
 # broke the tomllib-based gate that replaced it.
@@ -65,6 +84,10 @@ MANIFEST_SHAPES = {
     "v0.9.6": "git",
     "v0.9.7": "git",
     "v0.9.8": "git",
+    "v2026.36": "git",
+    "v2026.39": "git",
+    "v2026.40.1": "git",
+    "v2026.41": "git",
 }
 
 API_WINDOWS = {
@@ -77,6 +100,10 @@ API_WINDOWS = {
     "v0.9.6": (2, 4),
     "v0.9.7": (2, 4),
     "v0.9.8": (2, 4),
+    "v2026.36": (2, 5),
+    "v2026.39": (2, 7),
+    "v2026.40.1": (3, 7),
+    "v2026.41": (3, 7),
 }
 
 
@@ -106,7 +133,7 @@ def test_host_manifest_shape_is_classified(tag):
     declares no version, and the previous gate treated that as "the requirement
     moved" and escalated nine nights running.
     """
-    dep = rg.declared_dep(host(tag, "Cargo.toml"), "acadrust")
+    _, _, dep = rg.codec_dep(host(tag, "Cargo.toml"))
     kind, value = rg.dep_kind(dep)
     assert kind == MANIFEST_SHAPES[tag]
     if kind == "git":
@@ -114,8 +141,9 @@ def test_host_manifest_shape_is_classified(tag):
         # declares one source in [dependencies] and redirects it in [patch], so
         # the declared spelling alone no longer predicts what the host builds.
         url, rev = rg.effective_acadrust(host(tag, "Cargo.toml"))
-        assert rg.slug(url) == TAGS[tag][1]
-        assert TAGS[tag][2].startswith(rev)  # manifest abbreviates the rev
+        expect_slug, expect_rev = (TAGS[tag][1:] if tag in TAGS else CODEC_TAGS[tag][2:])
+        assert rg.slug(url) == expect_slug
+        assert expect_rev.startswith(rev)  # manifest abbreviates the rev
 
 
 @pytest.mark.parametrize("tag", sorted(API_WINDOWS))
@@ -148,7 +176,7 @@ def test_gate_acadrust_accepts_the_git_pinned_manifest(tag):
     # (test_2026_36_dependency_override_and_api).
     report = rg.gate_acadrust(
         host(tag, "Cargo.lock"),
-        (REPO / "Cargo.toml").read_text(encoding="utf-8"),
+        ACADRUST_ERA.read_text(encoding="utf-8"),
         host("v0.9.8", "Cargo.lock"),
         tag=tag,
     )
@@ -186,7 +214,7 @@ def test_series_bump_escalates_for_the_git_manifest():
     with pytest.raises(rg.Escalate, match="Cargo will not cross"):
         rg.gate_acadrust(
             bumped,
-            (REPO / "Cargo.toml").read_text(encoding="utf-8"),
+            ACADRUST_ERA.read_text(encoding="utf-8"),
             host("v0.9.8", "Cargo.lock"),
             tag="v9.9.9",
         )
@@ -335,7 +363,7 @@ def test_rewrite_preserves_everything_it_was_not_asked_to_change():
 
 def test_rewrite_refuses_a_manifest_it_did_not_actually_match():
     """A regex that matches nothing is how a re-pin ships an unchanged manifest."""
-    with pytest.raises(rg.Unparseable, match="acadrust dependency to rewrite, rewrote 0"):
+    with pytest.raises(rg.Unparseable, match="codec dependency to rewrite, rewrote 0"):
         rg.rewrite_manifests(
             '[package]\nversion = "0.1.0"\n[dependencies]\n'
             'ocs_plugin_api = { git = "https://github.com/HakanSeven12/OpenCADStudio", rev = "'
@@ -357,16 +385,17 @@ def test_shipped_lockfile_agrees_with_the_shipped_pin():
     refreshed lockfile passes every gate here and fails at release time.
     """
     cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
-    kind, value = rg.dep_kind(rg.declared_dep(cargo, "acadrust"))
-    assert kind == "git", "the plugin pins acadrust by rev, like the host does"
+    _, package, dep = rg.codec_dep(cargo)
+    kind, value = rg.dep_kind(dep, package)
+    assert kind == "git", "the plugin pins the codec by rev, like the host does"
     declared_url, declared_rev = value
     patch = rg.patch_entry(cargo)
     if patch is not None:
         assert patch[0] == declared_url
         _, declared_url, declared_rev = patch
-    locked_url, locked_rev = rg.git_source(
-        rg.locked_package((REPO / "Cargo.lock").read_text(encoding="utf-8"), "acadrust")
-    )
+    locked = rg.locked_codec((REPO / "Cargo.lock").read_text(encoding="utf-8"))
+    assert locked["name"] == package
+    locked_url, locked_rev = rg.git_source(locked)
     assert rg.slug(locked_url) == rg.slug(declared_url)
     assert locked_rev.startswith(declared_rev)
 
@@ -392,6 +421,10 @@ def plugin_api(tag: str) -> str:
     return host(tag, "ocs_plugin_api-Cargo.toml")
 
 
+def tag_order(tag: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in tag.lstrip("v").split("."))
+
+
 def shipped_host_tag() -> str:
     """The corpus tag whose ocs_plugin_api matches the acadrust we declare.
 
@@ -402,7 +435,7 @@ def shipped_host_tag() -> str:
     working as intended — so not finding one is a skip, not a failure.
     """
     ours = rg.effective_acadrust((REPO / "Cargo.toml").read_text(encoding="utf-8"))
-    for tag in sorted(TAGS, reverse=True):
+    for tag in sorted([*TAGS, *CODEC_TAGS], key=tag_order, reverse=True):
         try:
             if rg.linked_acadrust(plugin_api(tag)) == ours:
                 return tag
@@ -589,11 +622,22 @@ def test_gate_source_identity_rejects_an_expanded_rev():
     `cargo generate-lockfile` really does emit two acadrust packages for this,
     and nothing in the manifest diff looks wrong.
     """
-    expanded = (REPO / "Cargo.toml").read_text(encoding="utf-8").replace(
+    expanded = ACADRUST_ERA.read_text(encoding="utf-8").replace(
         'rev = "931c4ab"', 'rev = "931c4ab0c590b755e280bed318a35f41c57b139f"'
     )
     with pytest.raises(rg.Escalate, match="abbreviated versus a full rev"):
         rg.gate_source_identity(expanded, plugin_api("v0.9.6"))
+
+
+def test_gate_source_identity_rejects_an_expanded_opencadcodec_rev():
+    """The same trap in the renamed package: v2026.41 writes rev = "8189f83"."""
+    shipped = (REPO / "Cargo.toml").read_text(encoding="utf-8")
+    assert 'rev = "8189f83"' in shipped
+    expanded = shipped.replace(
+        'rev = "8189f83"', 'rev = "8189f833574c544fc57a1d773591014c3a5907c9"'
+    )
+    with pytest.raises(rg.Escalate, match="abbreviated versus a full rev"):
+        rg.gate_source_identity(expanded, plugin_api("v2026.41"))
 
 
 def test_gate_source_identity_rejects_the_legacy_patch_manifest():
@@ -642,7 +686,7 @@ def test_rewrite_mirrors_the_hosts_patch_and_then_drops_it():
     stale redirect behind the day upstream removes theirs — pointing us at a rev
     the host no longer builds, with every spelling in the manifest still right.
     """
-    cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
+    cargo = ACADRUST_ERA.read_text(encoding="utf-8")
     plugin = (REPO / "plugin.toml").read_text(encoding="utf-8")
     common = dict(tag="v9.9.9", host_sha=NEW_SHA,
                   acad_url="https://github.com/HakanSeven12/cadcodec.git",
@@ -687,3 +731,88 @@ def test_rewrite_writes_an_abbreviated_rev_verbatim():
         acad_rev="deadbee", api_version=4,
     )
     assert 'rev = "deadbee", features = ["serde"]' in out
+
+
+# ------------------------------------------- the opencadcodec rename (v2026.39)
+
+
+@pytest.mark.parametrize("tag", sorted(CODEC_TAGS))
+def test_codec_resolves_from_the_lockfile_under_either_name(tag):
+    package, version, expect_slug, rev = CODEC_TAGS[tag]
+    pkg = rg.locked_codec(host(tag, "Cargo.lock"))
+    url, got_rev = rg.git_source(pkg)
+    assert (pkg["name"], pkg["version"], rg.slug(url), got_rev) == (package, version, expect_slug, rev)
+
+
+@pytest.mark.parametrize("tag", ["v2026.39", "v2026.40.1", "v2026.41"])
+def test_codec_dep_finds_the_renamed_package_under_the_codec_key(tag):
+    """The shape that broke the nightly re-pin: key `codec`, package opencadcodec."""
+    key, package, dep = rg.codec_dep(plugin_api(tag))
+    assert (key, package) == ("codec", "opencadcodec")
+    assert rg.linked_codec(plugin_api(tag))[0] == "opencadcodec"
+
+
+@pytest.mark.parametrize("tag", sorted(CODEC_TAGS))
+def test_host_plan_reproduces_the_codec_era_lockfile(tag):
+    plan = rg.host_acadrust_plan(plugin_api(tag), host(tag, "Cargo.toml"), host(tag, "Cargo.lock"))
+    assert plan["package"] == CODEC_TAGS[tag][0]
+    assert plan["locked_rev"] == CODEC_TAGS[tag][3]
+
+
+@pytest.mark.parametrize("tag", ["v2026.39", "v2026.40.1", "v2026.41"])
+def test_acadrust_era_plugin_escalates_on_the_rename(tag):
+    """A rename is a source migration (every `use` changes): a human decision,
+    exit 1 — not the exit-2 parser gap the nightly reported for two weeks."""
+    old = ACADRUST_ERA.read_text(encoding="utf-8")
+    with pytest.raises(rg.Escalate, match="source migration"):
+        rg.gate_acadrust(host(tag, "Cargo.lock"), old, host("v2026.36", "Cargo.lock"), tag=tag)
+    with pytest.raises(rg.Escalate, match="source migration"):
+        rg.gate_source_identity(old, plugin_api(tag), host(tag, "Cargo.toml"))
+
+
+def test_two_codecs_in_one_lockfile_escalate():
+    both = lock_with(
+        ("acadrust", "0.5.4", CADCODEC),
+        ("opencadcodec", "0.6.0",
+         "git+https://github.com/HakanSeven12/opencadcodec.git?rev=8189f83#8189f833574c544fc57a1d773591014c3a5907c9"),
+    )
+    with pytest.raises(rg.Escalate, match="two CAD codecs"):
+        rg.locked_codec(both)
+
+
+def test_shipped_manifest_passes_every_gate_against_its_host():
+    """What we ship today, against the host it is pinned to (v2026.41)."""
+    tag = shipped_host_tag()
+    assert tag == "v2026.41"
+    cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
+    lock = (REPO / "Cargo.lock").read_text(encoding="utf-8")
+    report = rg.gate_acadrust(host(tag, "Cargo.lock"), cargo, lock, tag=tag)
+    assert report["host_package"] == "opencadcodec"
+    rg.gate_source_identity(cargo, plugin_api(tag), host(tag, "Cargo.toml"))
+    assert rg.gate_abi(lock, CODEC_TAGS[tag][3])["package"] == "opencadcodec"
+    api = rg.gate_api_version(host(tag, "manifest.rs"), (REPO / "plugin.toml").read_text(encoding="utf-8"), tag)
+    assert api["ours"] == api["target"] == 7
+
+
+def test_codec_series_bump_escalates():
+    bumped = lock_with(("opencadcodec", "0.7.0",
+                        "git+https://github.com/HakanSeven12/opencadcodec.git?rev=abcdef0#" + "a" * 40))
+    with pytest.raises(rg.Escalate, match="Cargo will not cross"):
+        rg.gate_acadrust(bumped, (REPO / "Cargo.toml").read_text(encoding="utf-8"),
+                         (REPO / "Cargo.lock").read_text(encoding="utf-8"), tag="v9.9.9")
+
+
+def test_rewrite_keeps_the_codec_package_and_key():
+    cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
+    plugin = (REPO / "plugin.toml").read_text(encoding="utf-8")
+    out, _, _ = rg.rewrite_manifests(
+        cargo, plugin, tag="v9.9.9", host_sha=NEW_SHA,
+        acad_url="https://github.com/HakanSeven12/opencadcodec.git", acad_rev="1234567",
+        api_version=7, patch=("https://github.com/HakanSeven12/opencadcodec.git",
+                              "https://git@github.com/HakanSeven12/opencadcodec.git", "c" * 40),
+    )
+    assert ('codec = { package = "opencadcodec", git = '
+            '"https://github.com/HakanSeven12/opencadcodec.git", rev = "1234567"') in out
+    # A [patch] entry is keyed by package name, not by our dependency key.
+    assert 'opencadcodec = { git = "https://git@github.com/HakanSeven12/opencadcodec.git"' in out
+    assert rg.effective_acadrust(out) == ("https://git@github.com/HakanSeven12/opencadcodec.git", "c" * 40)

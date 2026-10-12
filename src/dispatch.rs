@@ -5,9 +5,9 @@
 
 use std::fs;
 
-use acadrust::xdata::{ExtendedDataRecord, XDataValue};
-use acadrust::entities::Mesh;
-use acadrust::{
+use codec::xdata::{ExtendedDataRecord, XDataValue};
+use codec::entities::Mesh;
+use codec::{
     Arc as CadArc, Circle, Color, EntityType, Line, LwPolyline, Point as CadPoint, Text, Vector2, Vector3,
 };
 
@@ -1457,7 +1457,7 @@ fn surface_tag(e: &EntityType) -> Option<(&str, &str)> {
 /// * TIN-edge `Line`s tagged `[name, "TIN"]` (`LS_SURFACE` / `draw_tin`) — the
 ///   unique endpoints re-triangulated with [`Surface::from_points`], the same
 ///   Delaunay builder that produced them, which reproduces the original TIN.
-fn find_surface_in_document(doc: &acadrust::CadDocument, token: &str) -> Option<(String, Surface)> {
+fn find_surface_in_document(doc: &codec::CadDocument, token: &str) -> Option<(String, Surface)> {
     // Pass 1: exact geometry from a tagged Mesh.
     for e in doc.entities() {
         let EntityType::Mesh(m) = e else { continue };
@@ -2200,8 +2200,8 @@ fn place(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, source: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use acadrust::tables::{AppId, TableEntry};
-    use acadrust::{CadDocument, DwgReader, DwgWriter};
+    use codec::tables::{AppId, TableEntry};
+    use codec::{CadDocument, DwgReader, DwgWriter};
     use landsurvey::alignment;
     use std::io::Cursor;
 
@@ -2230,13 +2230,13 @@ mod tests {
         fn document_mut(&mut self) -> &mut CadDocument {
             &mut self.doc
         }
-        fn add_entity(&mut self, entity: EntityType) -> acadrust::Handle {
+        fn add_entity(&mut self, entity: EntityType) -> codec::Handle {
             self.doc.add_entity(entity).expect("add_entity")
         }
         fn bump_geometry(&mut self) {}
         fn read_record(
             &self,
-            handle: acadrust::Handle,
+            handle: codec::Handle,
             app_name: &str,
         ) -> Option<&ExtendedDataRecord> {
             self.doc
@@ -2245,7 +2245,7 @@ mod tests {
                 .extended_data
                 .get_record(app_name)
         }
-        fn write_record(&mut self, handle: acadrust::Handle, record: ExtendedDataRecord) -> bool {
+        fn write_record(&mut self, handle: codec::Handle, record: ExtendedDataRecord) -> bool {
             // Mirror the host's ensure_app_id contract (OCS #249).
             if !self.doc.app_ids.contains(&record.application_name) {
                 let mut app = AppId::new(&record.application_name);
@@ -2260,7 +2260,7 @@ mod tests {
                 None => false,
             }
         }
-        fn remove_record(&mut self, _handle: acadrust::Handle, _app_name: &str) -> bool {
+        fn remove_record(&mut self, _handle: codec::Handle, _app_name: &str) -> bool {
             false
         }
         fn push_undo(&mut self, _label: &str) {}
@@ -2296,8 +2296,10 @@ mod tests {
             &mut self,
             _plugin_id: &'static str,
             _init: &mut dyn FnMut() -> Box<dyn std::any::Any + Send + Sync>,
-        ) -> &mut (dyn std::any::Any + Send + Sync) {
-            unimplemented!("not exercised by these tests")
+        ) -> Option<&mut (dyn std::any::Any + Send + Sync)> {
+            // Like the out-of-process host: no host-side plugin state (the
+            // plugin keeps its own in crate::state).
+            None
         }
         fn document_reader(&self) -> Box<dyn ocs_plugin_api::host::DocumentReader + '_> {
             unimplemented!("not exercised by these tests")
@@ -3031,7 +3033,7 @@ mod tests {
         rec.add_value(XDataValue::String("IRON PIN".into()));
         pt.common_mut().extended_data.add_record(rec);
         // What the host's ensure_layer does since #252: table entry + real handle.
-        let mut layer = acadrust::tables::layer::Layer::new("LS-PT-IP");
+        let mut layer = codec::tables::layer::Layer::new("LS-PT-IP");
         layer.handle = doc.allocate_handle();
         let _ = doc.layers.add(layer);
         let h = doc.add_entity(pt).expect("add point");

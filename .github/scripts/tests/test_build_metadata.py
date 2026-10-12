@@ -11,23 +11,34 @@ import repin_gates as gates
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def test_2026_36_dependency_override_and_api():
+def test_2026_36_dependency_override():
     fixture = Path(__file__).parent / "fixtures" / "host" / "v2026.36"
     read = lambda name: (fixture / name).read_text(encoding="utf-8")
     plan = gates.host_acadrust_plan(read("ocs_plugin_api-Cargo.toml"), read("Cargo.toml"), read("Cargo.lock"))
     assert plan["locked_rev"] == "5b56571a190e7a17c8f12d36390d2938b0fb72f7"
     assert plan["rev"] == "c91a1c1de89a0fbc006dc360ddb0251ac8c207d1"
-    result = gates.gate_api_version(read("manifest.rs"), (ROOT / "plugin.toml").read_text(), "v2026.36")
-    assert result["target"] == 5
+
+
+def test_2026_41_renamed_codec_and_api():
+    fixture = Path(__file__).parent / "fixtures" / "host" / "v2026.41"
+    read = lambda name: (fixture / name).read_text(encoding="utf-8")
+    plan = gates.host_acadrust_plan(read("ocs_plugin_api-Cargo.toml"), read("Cargo.toml"), read("Cargo.lock"))
+    assert (plan["package"], plan["rev"]) == ("opencadcodec", "8189f83")
+    assert plan["locked_rev"] == "8189f833574c544fc57a1d773591014c3a5907c9"
+    result = gates.gate_api_version(read("manifest.rs"), (ROOT / "plugin.toml").read_text(), "v2026.41")
+    assert result["target"] == 7
     report = gates.gate_acadrust(read("Cargo.lock"), (ROOT / "Cargo.toml").read_text(),
-                                (ROOT / "Cargo.lock").read_text(), "v2026.36")
-    assert report["host_version"] == "0.5.4"
+                                (ROOT / "Cargo.lock").read_text(), "v2026.41")
+    assert report["host_version"] == "0.6.0"
 
 
 def test_generated_manifest_uses_resolved_source():
     host = json.loads((ROOT / "host-build.json").read_text())
     result = tomllib.loads(generate(ROOT, host["rustc_version"]))
-    source = next(p["source"] for p in tomllib.loads((ROOT / "Cargo.lock").read_text())["package"] if p["name"] == "acadrust")
+    # The host keeps the key `acadrust_source`; its value is the codec package's
+    # source, whichever name the codec goes by (opencadcodec since v2026.39).
+    source = gates.locked_codec((ROOT / "Cargo.lock").read_text())["source"]
+    assert "opencadcodec" in source
     assert result["opencad"]["acadrust_source"] == source
     assert result["opencad"]["rustc_version"] == host["rustc_version"]
 
