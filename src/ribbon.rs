@@ -112,18 +112,27 @@ impl CadModule for LandSurveyModule {
                             ],
                         },
                     }),
-                    // Native picker -> "LS_LANDXML <path>": import a LandXML TIN
-                    // surface as a Mesh entity (per OpenCADStudio issue #157).
+                    // Native picker -> "LS_LANDXML <path>": import LandXML points,
+                    // parcels, plan features and TIN surfaces (surfaces as Mesh,
+                    // per OpenCADStudio issue #157).
                     RibbonItem::LargeTool(ToolDef {
                         id: "LS_LANDXML",
                         label: "LandXML",
                         icon: IconKind::Glyph("\u{229E}"), // ⊞ (mesh)
                         event: ModuleEvent::PluginFileDialog {
                             command: "LS_LANDXML".to_string(),
-                            title: "Import LandXML TIN surface".to_string(),
-                            filter_name: "LandXML surface".to_string(),
+                            title: "Import LandXML points, parcels and surfaces".to_string(),
+                            filter_name: "LandXML".to_string(),
                             extensions: vec!["xml".to_string(), "landxml".to_string()],
                         },
+                    }),
+                    // The host has no save dialog for plugins: clicking prints
+                    // usage; the user then types `LS_LANDXMLOUT <file.xml>`.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_LANDXMLOUT",
+                        label: "LandXML Out",
+                        icon: IconKind::Glyph("\u{21E5}"), // ⇥ (export)
+                        event: ModuleEvent::Command("LS_LANDXMLOUT".to_string()),
                     }),
                     // Clicking prints usage; the user then types
                     // `LS_VOLUME <top.csv> <bottom.csv> [grid_step] [draw]`.

@@ -1,0 +1,92 @@
+<?xml version="1.0"?>
+<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.landxml.org/schema/LandXML-1.2 http://www.landxml.org/schema/LandXML-1.2/LandXML-1.2.xsd" version="1.2" date="2025-06-12" time="10:32:03" readOnly="false" language="English">
+  <Application name="12d Model" manufacturer="12d Solutions Pty Ltd" manufacturerURL="www.12d.com" version="15.0C1r">
+    <Author createdBy="12D XML Team" createdByEmail="support@12d.com"/>
+  </Application>
+  <Project name="60741900 1000 UTD" desc="60741900 1000 UTD"/>
+  <Units>
+    <Metric linearUnit="meter" areaUnit="squareMeter" volumeUnit="cubicMeter" temperatureUnit="celsius" pressureUnit="HPA"/>
+  </Units>
+  <Settings>
+    <Transition_mapping name="Standard.trans_map"/>
+  </Settings>
+  <Alignments>
+    <Alignment name="TYLL" staStart="0" length="818.8804">
+      <CoordGeom>
+        <Line staStart="0">
+          <Start>823524.906716 826554.181253</Start>
+          <End>823550.301728 826615.625134</End>
+        </Line>
+        <Spiral staStart="66.485015" desc="" length="51.5" radiusStart="INF" radiusEnd="88" rot="ccw" spiType="clothoid">
+          <Start>823550.301728 826615.625134</Start>
+          <PI>823563.475196 826647.498676</PI>
+          <End>823574.419219 826660.90732</End>
+        </Spiral>
+        <Curve staStart="117.985015" rot="ccw" crvType="arc" radius="88">
+          <Start>823574.419219 826660.907319</Start>
+          <Center>823642.593908 826605.263704</Center>
+          <End>823722.259164 826642.646146</End>
+        </Curve>
+        <Spiral staStart="295.596729" desc="" length="51.5" radiusStart="88" radiusEnd="INF" rot="ccw" spiType="clothoid">
+          <Start>823722.259164 826642.646146</Start>
+          <PI>823729.611567 826626.97753</PI>
+          <End>823734.633394 826592.856507</End>
+        </Spiral>
+        <Line staStart="347.096729">
+          <Start>823734.633394 826592.856507</Start>
+          <End>823735.386555 826587.739124</End>
+        </Line>
+        <Spiral staStart="352.269239" desc="" length="50" radiusStart="INF" radiusEnd="92.4" rot="cw" spiType="clothoid">
+          <Start>823735.386555 826587.739124</Start>
+          <PI>823740.258909 826554.633699</PI>
+          <End>823747.051903 826539.286081</End>
+        </Spiral>
+        <Curve staStart="402.269239" rot="cw" crvType="arc" radius="92.4">
+          <Start>823747.051903 826539.286081</Start>
+          <Center>823831.545547 826576.683729</Center>
+          <End>823867.999339 826491.7786</End>
+        </Curve>
+        <Spiral staStart="546.381162" desc="" length="50" radiusStart="92.4" radiusEnd="INF" rot="cw" spiType="clothoid">
+          <Start>823867.999339 826491.7786</Start>
+          <PI>823883.4217 826498.40015</PI>
+          <End>823909.522533 826519.339478</End>
+        </Spiral>
+        <Line staStart="596.381162">
+          <Start>823909.522533 826519.339478</Start>
+          <End>823967.220681 826565.627675</End>
+        </Line>
+        <Spiral staStart="670.351923" desc="" length="49" radiusStart="INF" radiusEnd="92" rot="ccw" spiType="clothoid">
+          <Start>823967.220681 826565.627675</Start>
+          <PI>823992.796403 826586.145736</PI>
+          <End>824007.879236 826592.697719</End>
+        </Spiral>
+        <Curve staStart="719.351923" rot="ccw" crvType="arc" radius="92">
+          <Start>824007.879236 826592.697719</Start>
+          <Center>824044.534886 826508.315473</Center>
+          <End>824055.128257 826599.70355</End>
+        </Curve>
+        <Spiral staStart="767.670952" desc="" length="49" radiusStart="92" radiusEnd="INF" rot="ccw" spiType="clothoid">
+          <Start>824055.128257 826599.70355</Start>
+          <PI>824071.463341 826597.810047</PI>
+          <End>824101.892393 826585.596074</End>
+        </Spiral>
+        <Line staStart="816.670952">
+          <Start>824101.892393 826585.596074</Start>
+          <End>824103.942829 826584.773046</End>
+        </Line>
+      </CoordGeom>
+      <Profile>
+        <ProfAlign name="Vertical Geometry">
+          <PVI>0 75.830493</PVI>
+          <ParaCurve length="83.087371" desc="">53.470079 75.694562</ParaCurve>
+          <ParaCurve length="62.350926" desc="">126.189253 74.411143</ParaCurve>
+          <ParaCurve length="144" desc="">461.726454 47.568167</ParaCurve>
+          <ParaCurve length="104" desc="">683.371098 65.299739</ParaCurve>
+          <ParaCurve length="52.664574" desc="">763.593297 58.881963</ParaCurve>
+          <ParaCurve length="28.682285" desc="">804.266752 58.00814</ParaCurve>
+          <PVI>818.880348 57.447623</PVI>
+        </ProfAlign>
+      </Profile>
+    </Alignment>
+  </Alignments>
+</LandXML>
