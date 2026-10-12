@@ -191,16 +191,51 @@ fn split_fields(line: &str, delim: Delimiter, upto: usize) -> Vec<String> {
     raw.iter().map(|f| unquote(f)).collect()
 }
 
-/// A finite number, or `None`. Under a semicolon delimiter a single decimal
-/// comma (`5000,123`) is read as a decimal point.
+/// A finite number, or `None`. Under a semicolon delimiter the decimal-comma
+/// notation of those locales is read too (see [`decimal_comma`]).
 fn number(field: &str, delim: Delimiter) -> Option<f64> {
-    let v = field.parse::<f64>().ok().or_else(|| {
-        let decimal_comma = delim == Delimiter::Semicolon
-            && field.matches(',').count() == 1
-            && !field.contains('.');
-        decimal_comma.then(|| field.replace(',', ".").parse::<f64>().ok()).flatten()
-    })?;
+    let v = field
+        .parse::<f64>()
+        .ok()
+        .or_else(|| (delim == Delimiter::Semicolon).then(|| decimal_comma(field)).flatten())?;
     v.is_finite().then_some(v)
+}
+
+/// Decimal-comma notation, as Excel writes it in pt-BR / de-DE locales: one
+/// decimal comma (`5000,123`), optionally with dot thousands separators in
+/// groups of three (`7.395.000,000`, `1.234,5`). Dots alone count as
+/// thousands separators only when there are at least two groups
+/// (`7.395.000`): a lone `395.000` already parsed as 395.0 above, and stays
+/// that way. Only used for semicolon files, where a comma cannot be a
+/// delimiter.
+fn decimal_comma(field: &str) -> Option<f64> {
+    let (int, frac) = match field.split_once(',') {
+        Some((_, f)) if f.contains([',', '.']) => return None,
+        Some((i, f)) => (i, Some(f)),
+        None => (field, None),
+    };
+    let (sign, digits) = int.strip_prefix('-').map_or(("", int), |d| ("-", d));
+    let groups: Vec<&str> = digits.split('.').collect();
+    let all_digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+    if !groups.iter().all(|g| all_digits(g)) {
+        return None;
+    }
+    if groups.len() > 1 {
+        let well_grouped = groups[0].len() <= 3 && groups[1..].iter().all(|g| g.len() == 3);
+        if !well_grouped || (frac.is_none() && groups.len() < 3) {
+            return None;
+        }
+    } else if frac.is_none() {
+        return None;
+    }
+    let mut text = format!("{sign}{}", groups.concat());
+    if let Some(f) = frac {
+        if !all_digits(f) {
+            return None;
+        }
+        text = format!("{text}.{f}");
+    }
+    text.parse().ok()
 }
 
 /// Parse PNEZD text (comma/tab/space auto-detected, PNEZD order), counting
@@ -394,6 +429,50 @@ garbage line
         let out = parse("7;5000;1000;100;FENCE 12,5 m, gate");
         assert_eq!(out.points[0].northing, 5000.0);
         assert_eq!(out.points[0].description, "FENCE 12,5 m, gate");
+    }
+
+    #[test]
+    fn semicolon_thousands_separators() {
+        // Excel pt-BR "CSV (separado por ponto e virgula)" with dotted thousands.
+        let text = "1;7.395.000,000;333.000,000;752,000;MARCO\n\
+                    2;7.395.010,5;333.010;752,1;MARCO\n\
+                    3;-1.234,5;7.395.000;0;NEG\n";
+        let out = parse(text);
+        assert_eq!((out.points.len(), out.skipped), (3, 0));
+        let p = &out.points[0];
+        assert_eq!((p.northing, p.easting, p.elevation), (7_395_000.0, 333_000.0, 752.0));
+        assert_eq!(out.points[0].description, "MARCO");
+        // A lone dot group stays a decimal point, as in every other file.
+        assert_eq!((out.points[1].northing, out.points[1].easting), (7_395_010.5, 333.01));
+        // Dots alone count as thousands with two or more groups.
+        assert_eq!((out.points[2].northing, out.points[2].easting), (-1_234.5, 7_395_000.0));
+    }
+
+    #[test]
+    fn malformed_grouping_is_skipped_not_misread() {
+        for line in [
+            "1;7.39.000,0;333000;0;BAD",  // a group of two
+            "1;7.3950.000,0;333000;0;BAD", // a group of four
+            "1;7.395,000,0;333000;0;BAD",  // two commas
+            "1;7,395.000;333000;0;BAD",    // dot after the comma
+        ] {
+            assert_eq!(parse(line).points.len(), 0, "{line}");
+        }
+    }
+
+    #[test]
+    fn decimal_commas_stay_off_outside_semicolon_files() {
+        // A space- or tab-separated file with decimal commas must not be read
+        // as a comma file with the spaces squeezed out (7395000,123 becoming
+        // northing 123345000): the commas are not accepted there at all.
+        for line in ["1 7395000,123 345000,456 100,5 MON", "1\t7395000,123\t345000,456\t100,5\tMON"] {
+            let out = parse(line);
+            assert!(
+                out.points.iter().all(|p| p.northing < 10_000_000.0 && p.northing != 123_345_000.0),
+                "{line}: {:?}",
+                out.points
+            );
+        }
     }
 
     #[test]

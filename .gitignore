@@ -14,3 +14,4 @@ docs/landxml-import-proposal.md
 # Python bytecode from the re-pin gate tests.
 __pycache__/
 *.pyc
+field-test-results*/
