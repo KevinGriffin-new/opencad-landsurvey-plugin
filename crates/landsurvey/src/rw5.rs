@@ -62,6 +62,9 @@ pub struct Setup {
     /// measured minus known backsight elevation.
     pub bs_distance_error: Option<f64>,
     pub bs_elevation_error: Option<f64>,
+    /// Recorded back azimuth minus the azimuth computed from the station and
+    /// backsight coordinates, in arc-seconds, when both are available.
+    pub bs_azimuth_error: Option<f64>,
 }
 
 /// A point name observed more than once; the first value is kept.
@@ -158,6 +161,16 @@ fn parse_line(line: &str) -> Option<Record<'_>> {
         fields: parts.map(str::trim).collect(),
         desc,
     })
+}
+
+/// Reduce a data collector raw file, picking the format from its content:
+/// Sokkia SDR (an `00NMSDR` header) or RW5. Returns the format name too.
+pub fn reduce_any(text: &str) -> (&'static str, Reduction) {
+    if crate::sdr::looks_like_sdr(text) {
+        ("Sokkia SDR", crate::sdr::reduce(text))
+    } else {
+        ("RW5", reduce(text))
+    }
 }
 
 /// Reduce an RW5 file to coordinates.
@@ -283,11 +296,17 @@ pub fn reduce(text: &str) -> Reduction {
                     stored_delta,
                     bs_distance_error: None,
                     bs_elevation_error: None,
+                    bs_azimuth_error: None,
                 });
             }
             "BK" => {
                 let bp = r.get("BP").map(str::to_string);
                 let bc = r.angle("BC").unwrap_or(0.0);
+                let az_check = match (r.angle("BS"), station.as_ref(), bp.as_ref()) {
+                    (Some(bs), Some(s), Some(b)) => azimuth_between(&out, &index, s, b)
+                        .map(|calc| angle_diff_seconds(bs, calc)),
+                    _ => None,
+                };
                 let bs = r.angle("BS").or_else(|| {
                     // No back azimuth written: compute it from coordinates.
                     let (s, b) = (station.as_ref()?, bp.as_ref()?);
@@ -302,6 +321,7 @@ pub fn reduce(text: &str) -> Reduction {
                             s.backsight = bp;
                             s.orientation = o;
                             s.hi = hi;
+                            s.bs_azimuth_error = az_check;
                         }
                     }
                     None => out.warnings.push(format!("line {at}: backsight without an azimuth or known points")),
@@ -418,17 +438,38 @@ fn observe(
     })
 }
 
+/// Grid azimuth (degrees) from point `a` to point `b`, when both are known.
+pub(crate) fn azimuth_between(
+    out: &Reduction,
+    index: &HashMap<String, usize>,
+    a: &str,
+    b: &str,
+) -> Option<f64> {
+    let (p, q) = (&out.points[*index.get(a)?], &out.points[*index.get(b)?]);
+    if p.northing == q.northing && p.easting == q.easting {
+        return None;
+    }
+    Some((q.easting - p.easting).atan2(q.northing - p.northing).to_degrees().rem_euclid(360.0))
+}
+
+/// `a − b` in arc-seconds, wrapped to ±180°.
+pub(crate) fn angle_diff_seconds(a: f64, b: f64) -> f64 {
+    ((a - b + 180.0).rem_euclid(360.0) - 180.0) * 3600.0
+}
+
 /// Add a point, keeping the first value of a repeated name and recording the
 /// repeat's difference for QC.
-fn add_point(out: &mut Reduction, index: &mut HashMap<String, usize>, p: Point) {
+pub(crate) fn add_point(out: &mut Reduction, index: &mut HashMap<String, usize>, p: Point) {
     match index.get(&p.name) {
         Some(&i) => {
             let q = &out.points[i];
-            out.repeats.push(Repeat {
-                name: p.name.clone(),
-                dh: (p.northing - q.northing).hypot(p.easting - q.easting),
-                dz: p.elevation - q.elevation,
-            });
+            let dh = (p.northing - q.northing).hypot(p.easting - q.easting);
+            let dz = p.elevation - q.elevation;
+            // An identical repeat (a station re-occupied with the same
+            // coordinates) is not a check; only report real differences.
+            if dh > 1e-9 || dz.abs() > 1e-9 {
+                out.repeats.push(Repeat { name: p.name.clone(), dh, dz });
+            }
         }
         None => {
             index.insert(p.name.clone(), out.points.len());
