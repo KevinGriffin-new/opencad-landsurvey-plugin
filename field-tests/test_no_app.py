@@ -180,6 +180,7 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
         bottom = copy_and_check_fixture(stage, "bottom.csv")
         outside = copy_and_check_fixture(stage, "resection-outside.csv")
         danger = copy_and_check_fixture(stage, "resection-danger.csv")
+        coded = copy_and_check_fixture(stage, "coded-linework.csv")
 
         core, _, core_err = run_host(
             host,
@@ -342,6 +343,34 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
         checks.check("DWG reopen restores imported points", reopened_summary.get("by_type", {}).get("Point") == 3, str(reopened_summary))
         roundtrip = stage / "roundtrip.dxf"
         checks.check("LANDSURVEY_POINT survives save/reopen", roundtrip.is_file() and "LANDSURVEY_POINT" in roundtrip.read_text(errors="replace"))
+
+        finish, _, _ = run_host(
+            host,
+            stage,
+            [
+                {"op": "new"},
+                {"op": "run", "cmd": f"LS_PNEZD {coded.name}"},
+                {"op": "run", "cmd": "LS_FINISH lines"},
+                {"op": "query"},
+                {"op": "run", "cmd": "LS_FINISH lines"},
+                {"op": "entities"},
+            ],
+            output,
+            "07-finish",
+        )
+
+        def figure_layers(items: Iterable[dict[str, Any]]) -> list[str]:
+            return sorted(
+                item.get("layer", "")
+                for item in items
+                if "olyline" in str(item.get("type", "")) and str(item.get("layer", "")).startswith("LS-LN-")
+            )
+
+        first = figure_layers(entities(finish).get("entities", []))
+        checks.check("LS_FINISH draws one figure per coded string", first == ["LS-LN-BLDG", "LS-LN-ER"], str(first))
+        rerun = entity_counts(finish)
+        polylines = sum(count for kind, count in rerun.get("by_type", {}).items() if "olyline" in kind)
+        checks.check("LS_FINISH re-run replaces its figures over IPC", polylines == 2, str(rerun))
 
     checks.finish()
     (output / "summary.json").write_text(json.dumps({"checks": checks.passed, "status": "passed"}, indent=2) + "\n", encoding="utf-8")

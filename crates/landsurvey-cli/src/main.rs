@@ -23,11 +23,13 @@ USAGE:
   landsurvey-cli helmert <pairs.csv> [--apply <points.csv>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
   landsurvey-cli resect  <shots.csv> [-o out.dxf]
   landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
+  landsurvey-cli finish  <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
 LandXML (auto-detected). rts = Rotate/Translate/Scale about a base point (CCW+);
 --to translates the base to a new location. DXF layers: LS-TIN-*, LS-CUTFILL/
-LS-DATUM, LS-RTS-SRC/DST, LS-*-LABEL.";
+LS-DATUM, LS-RTS-SRC/DST, LS-*-LABEL. finish connects coded points into
+field-to-finish figures (LS-LN-<CODE>) and lists them.";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -52,6 +54,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "helmert" => cmd_helmert(&args[1..]),
         "resect" => cmd_resect(&args[1..]),
         "inverse" => cmd_inverse(&args[1..]),
+        "finish" => cmd_finish(&args[1..]),
         "" | "-h" | "--help" | "help" => Ok(USAGE.to_string()),
         other => Err(format!("unknown subcommand \"{other}\"\n\n{USAGE}")),
     }
@@ -597,6 +600,73 @@ fn read_surface(path: &str) -> Result<Surface, String> {
         .map(|p| [p.easting, p.northing, p.elevation])
         .collect();
     Ok(Surface::from_points(&nodes))
+}
+
+/// `finish <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]`
+/// — connect coded points into figures, list them, and draw them to a DXF.
+fn cmd_finish(args: &[String]) -> Result<String, String> {
+    use landsurvey::finish::{self, Mode, Options, Order};
+    let (pos, opts) = split_args(args, &["--mode", "--order", "-o", "--out"]);
+    let path = pos
+        .first()
+        .ok_or("usage: finish <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]")?;
+    let mut o = Options::default();
+    match opts.get("mode").map(String::as_str) {
+        None | Some("strings") => {}
+        Some("xyz") => o.mode = Mode::Xyz,
+        Some(m) => return Err(format!("unknown --mode \"{m}\" (strings or xyz)")),
+    }
+    match opts.get("order").map(String::as_str) {
+        None | Some("shot") => {}
+        Some("number") => o.order = Order::Number,
+        Some(m) => return Err(format!("unknown --order \"{m}\" (shot or number)")),
+    }
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let parsed = pnezd::parse(&text);
+    let points: Vec<finish::CodedPoint> = parsed
+        .points
+        .into_iter()
+        .map(|p| finish::CodedPoint {
+            name: p.number,
+            northing: p.northing,
+            easting: p.easting,
+            elevation: p.elevation,
+            description: p.description,
+        })
+        .collect();
+    let lw = finish::build(&points, &o);
+
+    let mut d = DxfBuilder::new();
+    d.add_layer("LS-POINTS", 7);
+    for p in &points {
+        d.point("LS-POINTS", [p.easting, p.northing, p.elevation]);
+    }
+    let mut out = format!("{} figure(s) from {} point(s)\n", lw.figures.len(), points.len());
+    for f in &lw.figures {
+        let layer = format!("LS-LN-{}", f.code);
+        d.add_layer(&layer, 2);
+        let xy = |v: &finish::Vertex| [points[v.point].easting, points[v.point].northing, 0.0];
+        for w in f.vertices.windows(2) {
+            d.line(&layer, xy(&w[0]), xy(&w[1]));
+        }
+        if f.closed {
+            d.line(&layer, xy(f.vertices.last().unwrap()), xy(&f.vertices[0]));
+        }
+        let names: Vec<&str> = f.vertices.iter().map(|v| points[v.point].name.as_str()).collect();
+        out.push_str(&format!(
+            "  {:<10} {}{}\n",
+            f.string,
+            names.join("-"),
+            if f.closed { " (closed)" } else { "" }
+        ));
+    }
+    for w in &lw.warnings {
+        out.push_str(&format!("  warning: {w}\n"));
+    }
+    let dxf = opt(&opts).unwrap_or_else(|| format!("{}-finish.dxf", stem(path).to_lowercase()));
+    write_file(&dxf, &d.build())?;
+    out.push_str(&format!("-> {dxf}"));
+    Ok(out)
 }
 
 /// Split argv into positionals and the values of known `value_flags` (each of

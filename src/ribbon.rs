@@ -41,6 +41,13 @@ impl CadModule for LandSurveyModule {
                         icon: IconKind::Glyph("\u{2261}"), // ≡
                         event: ModuleEvent::Command("LS_LIST".to_string()),
                     }),
+                    // Field-to-finish: connect coded points into figures.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_FINISH",
+                        label: "Linework",
+                        icon: IconKind::Glyph("\u{2933}"), // ⤳
+                        event: ModuleEvent::Command("LS_FINISH".to_string()),
+                    }),
                 ],
             },
             RibbonGroup {
