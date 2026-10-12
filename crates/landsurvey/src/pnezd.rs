@@ -7,11 +7,17 @@
 //! ```
 //!
 //! Blank lines and lines beginning with `#` are ignored. Real-world survey
-//! exports vary in **delimiter** (comma / tab / runs of spaces) and **column
-//! order** (PNEZD vs PENZD vs bespoke), so parsing is configurable via
+//! exports vary in **delimiter** (comma / tab / semicolon / runs of spaces),
+//! **column order** (PNEZD vs PENZD vs bespoke) and **line ending** (LF, CRLF,
+//! or the bare CR of classic Mac exports), so parsing is configurable via
 //! [`Format`]; [`parse`] keeps the convenient PNEZD default with auto-detected
 //! delimiter. The description is read as the REMAINDER from its column onward,
 //! so a trailing free-text description may itself contain the delimiter.
+//!
+//! Fields may be double-quoted, CSV style (`"IRON PIN, FND"`, `""` for a
+//! literal quote). In semicolon-delimited files a decimal comma (`5000,123`)
+//! is accepted, as European locales export them. Coordinates must be finite:
+//! `NaN` and `inf` lines are skipped rather than imported.
 
 /// A single parsed point record. `number` is kept as a string so alphanumeric
 /// point names ("CP1", "TBM") survive — survey numbers are not always integers.
@@ -44,10 +50,13 @@ pub struct ParseOutcome {
 /// Field delimiter for a point file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Delimiter {
-    /// Comma if the line has one, else tab, else any run of whitespace.
+    /// Per line: comma, tab and semicolon in the order they first appear,
+    /// then whitespace; the first that yields a numeric northing and easting.
     Auto,
     Comma,
     Tab,
+    /// `;` — the CSV separator in locales that write a decimal comma.
+    Semicolon,
     /// Any run of ASCII whitespace (collapses repeated spaces — the common
     /// fixed-width / space-aligned export case).
     Whitespace,
@@ -98,19 +107,21 @@ impl Default for Format {
     }
 }
 
-fn resolve_delim(line: &str, d: Delimiter) -> Delimiter {
-    match d {
-        Delimiter::Auto => {
-            if line.contains(',') {
-                Delimiter::Comma
-            } else if line.contains('\t') {
-                Delimiter::Tab
-            } else {
-                Delimiter::Whitespace
-            }
-        }
-        other => other,
-    }
+/// The delimiters [`Delimiter::Auto`] tries on `line`: comma, tab and
+/// semicolon in the order they first appear (the one after the point number
+/// comes first, so commas in a semicolon file's description don't win), then
+/// whitespace, which also separates fields padded around a real delimiter.
+fn auto_order(line: &str) -> Vec<Delimiter> {
+    let mut found: Vec<(usize, Delimiter)> = [
+        (',', Delimiter::Comma),
+        ('\t', Delimiter::Tab),
+        (';', Delimiter::Semicolon),
+    ]
+    .into_iter()
+    .filter_map(|(c, d)| line.find(c).map(|i| (i, d)))
+    .collect();
+    found.sort_by_key(|&(i, _)| i);
+    found.into_iter().map(|(_, d)| d).chain([Delimiter::Whitespace]).collect()
 }
 
 /// `splitn` over runs of ASCII whitespace: the first `upto - 1` tokens, then the
@@ -136,15 +147,60 @@ fn splitn_whitespace(line: &str, upto: usize) -> Vec<String> {
     out
 }
 
-/// Split `line` into at most `upto` trimmed fields; the final field keeps the
+/// `splitn` on `sep`, ignoring separators inside double quotes: the first
+/// `upto - 1` fields, then the remainder as the final element.
+fn splitn_quoted(line: &str, sep: char, upto: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    for (i, c) in line.char_indices() {
+        if out.len() + 1 >= upto {
+            break;
+        }
+        if c == '"' {
+            quoted = !quoted;
+        } else if c == sep && !quoted {
+            out.push(line[start..i].to_string());
+            start = i + c.len_utf8();
+        }
+    }
+    out.push(line[start..].to_string());
+    out
+}
+
+/// Trim a field and, when the whole field is double-quoted, unwrap it and
+/// turn each `""` back into `"`.
+fn unquote(field: &str) -> String {
+    let f = field.trim();
+    match f.strip_prefix('"').and_then(|f| f.strip_suffix('"')) {
+        Some(inner) => inner.replace("\"\"", "\""),
+        None => f.to_string(),
+    }
+}
+
+/// Split `line` into at most `upto` unquoted fields; the final field keeps the
 /// remainder (so a trailing description retains embedded delimiters).
 fn split_fields(line: &str, delim: Delimiter, upto: usize) -> Vec<String> {
-    match delim {
-        Delimiter::Comma => line.splitn(upto, ',').map(|s| s.trim().to_string()).collect(),
-        Delimiter::Tab => line.splitn(upto, '\t').map(|s| s.trim().to_string()).collect(),
+    let raw = match delim {
+        Delimiter::Comma => splitn_quoted(line, ',', upto),
+        Delimiter::Tab => splitn_quoted(line, '\t', upto),
+        Delimiter::Semicolon => splitn_quoted(line, ';', upto),
         Delimiter::Whitespace => splitn_whitespace(line, upto),
-        Delimiter::Auto => unreachable!("resolve_delim removes Auto"),
-    }
+        Delimiter::Auto => unreachable!("parse_line picks a concrete delimiter"),
+    };
+    raw.iter().map(|f| unquote(f)).collect()
+}
+
+/// A finite number, or `None`. Under a semicolon delimiter a single decimal
+/// comma (`5000,123`) is read as a decimal point.
+fn number(field: &str, delim: Delimiter) -> Option<f64> {
+    let v = field.parse::<f64>().ok().or_else(|| {
+        let decimal_comma = delim == Delimiter::Semicolon
+            && field.matches(',').count() == 1
+            && !field.contains('.');
+        decimal_comma.then(|| field.replace(',', ".").parse::<f64>().ok()).flatten()
+    })?;
+    v.is_finite().then_some(v)
 }
 
 /// Parse PNEZD text (comma/tab/space auto-detected, PNEZD order), counting
@@ -170,38 +226,43 @@ pub fn parse_with(text: &str, fmt: &Format) -> ParseOutcome {
     .max()
     .unwrap_or(0);
 
-    for raw in text.lines() {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // LF, CRLF and bare CR all end a line; CRLF's empty middle is a blank line.
+    for raw in text.split(['\n', '\r']) {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let delim = resolve_delim(line, fmt.delimiter);
-        let f = split_fields(line, delim, max_idx + 1);
+        match parse_line(line, fmt, max_idx + 1) {
+            Some(p) => out.points.push(p),
+            None => out.skipped += 1,
+        }
+    }
+    out
+}
+
+/// One record under `fmt`, or `None` when no candidate delimiter gives a
+/// finite northing and easting.
+fn parse_line(line: &str, fmt: &Format, upto: usize) -> Option<PnezdPoint> {
+    let candidates = match fmt.delimiter {
+        Delimiter::Auto => auto_order(line),
+        d => vec![d],
+    };
+    candidates.into_iter().find_map(|delim| {
+        let f = split_fields(line, delim, upto);
         let get = |i: usize| f.get(i).map(String::as_str).unwrap_or("");
-
-        let (Ok(northing), Ok(easting)) =
-            (get(fmt.northing).parse::<f64>(), get(fmt.easting).parse::<f64>())
-        else {
-            out.skipped += 1;
-            continue;
-        };
-
-        let elevation = fmt
-            .elevation
-            .map(|i| get(i).parse::<f64>().unwrap_or(0.0))
-            .unwrap_or(0.0);
-        let number = fmt.number.map(|i| get(i).to_string()).unwrap_or_default();
-        let description = fmt.description.map(|i| get(i).to_string()).unwrap_or_default();
-
-        out.points.push(PnezdPoint {
-            number,
+        let northing = number(get(fmt.northing), delim)?;
+        let easting = number(get(fmt.easting), delim)?;
+        // A blank or unparseable elevation defaults to 0.0.
+        let elevation = fmt.elevation.and_then(|i| number(get(i), delim)).unwrap_or(0.0);
+        Some(PnezdPoint {
+            number: fmt.number.map(|i| get(i).to_string()).unwrap_or_default(),
             northing,
             easting,
             elevation,
-            description,
-        });
-    }
-    out
+            description: fmt.description.map(|i| get(i).to_string()).unwrap_or_default(),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -302,5 +363,71 @@ garbage line
         assert_eq!(p.elevation, 0.0);
         assert_eq!(p.number, "");
         assert_eq!(p.description, "GND");
+    }
+
+    #[test]
+    fn bare_cr_and_crlf_line_endings() {
+        let rows = ["1,5000,1000,100,IP", "2,5100,1020,101,IP", "3,5050,1100,99,CP"];
+        for sep in ["\r", "\r\n", "\n"] {
+            let out = parse(&rows.join(sep));
+            assert_eq!((out.points.len(), out.skipped), (3, 0), "separator {sep:?}");
+        }
+    }
+
+    #[test]
+    fn non_finite_coordinates_are_skipped() {
+        let out = parse("1,NaN,1000,1,A\n2,5000,inf,1,B\n3,-infinity,1,1,C\n4,5000,1000,100,OK\n");
+        assert_eq!((out.points.len(), out.skipped), (1, 3));
+        assert_eq!(out.points[0].number, "4");
+        // A non-finite elevation is unparseable, so it defaults like a blank one.
+        assert_eq!(parse("1,5000,1000,NaN,X").points[0].elevation, 0.0);
+    }
+
+    #[test]
+    fn semicolon_delimited_with_decimal_commas() {
+        let out = parse("1;5000,125;1000,5;100,25;IP gefunden\n2;5100;1020;101;CP\n");
+        assert_eq!((out.points.len(), out.skipped), (2, 0));
+        let p = &out.points[0];
+        assert_eq!((p.northing, p.easting, p.elevation), (5000.125, 1000.5, 100.25));
+        assert_eq!(p.description, "IP gefunden");
+        // Commas in a semicolon file's description don't hijack the split.
+        let out = parse("7;5000;1000;100;FENCE 12,5 m, gate");
+        assert_eq!(out.points[0].northing, 5000.0);
+        assert_eq!(out.points[0].description, "FENCE 12,5 m, gate");
+    }
+
+    #[test]
+    fn decimal_commas_only_under_semicolons() {
+        // In a comma file, "5000,125" is two fields, not a decimal.
+        let out = parse("1,5000,125,1000,IP");
+        assert_eq!(out.points[0].northing, 5000.0);
+        assert_eq!(out.points[0].easting, 125.0);
+    }
+
+    #[test]
+    fn quoted_fields_are_unwrapped() {
+        let text = "\"1\",\"5000.25\",\"1020.5\",\"101.25\",\"IP\"\n\
+                    2,5100,1020,101,\"IRON PIN, FND\"\n\
+                    \"A,3\",5050,1100,99,\"6\"\" \"\"PVC\"\"\"\n";
+        let out = parse(text);
+        assert_eq!((out.points.len(), out.skipped), (3, 0));
+        assert_eq!(out.points[0].northing, 5000.25);
+        assert_eq!(out.points[0].description, "IP");
+        assert_eq!(out.points[1].description, "IRON PIN, FND");
+        assert_eq!(out.points[2].number, "A,3");
+        assert_eq!(out.points[2].description, "6\" \"PVC\"");
+    }
+
+    #[test]
+    fn delimiter_in_a_tab_or_space_files_description() {
+        let out = parse("1\t5000\t1000\t100\tIP, found\n2 5100 1020 101 FENCE, wood\n");
+        assert_eq!((out.points.len(), out.skipped), (2, 0));
+        assert_eq!(out.points[0].description, "IP, found");
+        assert_eq!(out.points[1].description, "FENCE, wood");
+    }
+
+    #[test]
+    fn leading_bom_does_not_stick_to_the_first_number() {
+        assert_eq!(parse("\u{feff}1,5000,1000,100,IP").points[0].number, "1");
     }
 }

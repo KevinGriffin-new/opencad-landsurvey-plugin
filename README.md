@@ -8,7 +8,7 @@ It depends only on `ocs_plugin_api` (the host's stable contract crate) and
 exports the two C symbols the host loader expects (via
 `ocs_plugin_api::export_plugin!`). It adds a **Land Survey** ribbon tab with:
 
-- **Points** — PNEZD / PENZD import (delimiter auto-detected, alphanumeric
+- **Points** — PNEZD / PENZD import (delimiter and encoding auto-detected, alphanumeric
   names kept, optional preview); labeled points grouped onto per-feature-code
   layers; bearing/distance line labels via `LS_INVERSE … draw`; a point list.
 - **Surface** — build a TIN from PNEZD or **LandXML**; surface-to-surface and
