@@ -11,6 +11,8 @@ exports the two C symbols the host loader expects (via
 - **Points** — PNEZD / PENZD import (delimiter and encoding auto-detected, alphanumeric
   names kept, optional preview); labeled points grouped onto per-feature-code
   layers; bearing/distance line labels via `LS_INVERSE … draw`; a point list.
+- **Field data** — data collector raw files (TDS / Carlson **RW5**, FieldGenius `.raw`,
+  SurvCE) reduced to coordinates with per-setup backsight and check-shot QC.
 - **Surface** — build a TIN from PNEZD or **LandXML**; surface-to-surface and
   surface-to-datum **earthwork volumes** (exact TIN overlay + grid method) with
   drawn TINs, cut/fill lines, and result labels.
