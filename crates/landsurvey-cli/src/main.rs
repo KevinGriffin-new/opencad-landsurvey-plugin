@@ -219,7 +219,7 @@ fn cmd_rts(args: &[String]) -> Result<String, String> {
     // Conformal operates on (E, N); base/to are (N, E).
     let t = Conformal::from_base_swing((base.1, base.0), (to.1, to.0), rot, scale);
 
-    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     let parsed = pnezd::parse(&text);
     if parsed.points.is_empty() {
         return Err(format!("\"{path}\" has no usable points"));
@@ -280,7 +280,7 @@ fn cmd_rts(args: &[String]) -> Result<String, String> {
 fn cmd_helmert(args: &[String]) -> Result<String, String> {
     let (pos, opts) = split_args(args, &["-o", "--out", "--csv", "--apply", "--anim"]);
     let path = pos.first().ok_or("usage: helmert <pairs.csv> [--apply points.csv] [--anim out.svg] [-o out.dxf]")?;
-    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     let pairs = transform::parse_control_pairs(&text)
         .map_err(|e| format!("\"{path}\": {e}"))?;
     if pairs.len() < 2 {
@@ -388,7 +388,7 @@ fn cmd_helmert(args: &[String]) -> Result<String, String> {
     if let Some(apply_path) = opts.get("apply") {
         d.add_layer("LS-RTS-SRC", 8);
         d.add_layer("LS-RTS-DST", 3);
-        let atext = fs::read_to_string(apply_path)
+        let atext = read_text(apply_path)
             .map_err(|e| format!("cannot read \"{apply_path}\": {e}"))?;
         let parsed = pnezd::parse(&atext);
         let mut csv = String::new();
@@ -421,7 +421,7 @@ fn cmd_helmert(args: &[String]) -> Result<String, String> {
 fn cmd_resect(args: &[String]) -> Result<String, String> {
     let (pos, opts) = split_args(args, &["-o", "--out", "--anim"]);
     let path = pos.first().ok_or("usage: resect <shots.csv> [--anim out.svg] [-o out.dxf]")?;
-    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     let shots = resection::parse_resection_shots(&text);
     if shots.len() < 2 {
         return Err(format!("\"{path}\" has {} usable shot(s); need at least 2", shots.len()));
@@ -556,10 +556,16 @@ fn add_tin(d: &mut DxfBuilder, s: &Surface, layer: &str) {
     }
 }
 
+/// Read a text input file in whatever encoding it was exported in (UTF-8,
+/// UTF-16 with a BOM, or Windows-1252).
+fn read_text(path: &str) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| landsurvey::text::decode(&bytes))
+}
+
 /// Read a surface from a file, auto-detecting LandXML (a TIN with explicit
 /// faces) vs a PNEZD point file (triangulated here).
 fn read_surface(path: &str) -> Result<Surface, String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     if landxml::looks_like_landxml(&text) {
         let ns = landxml::read_first_surface(&text)
             .ok_or_else(|| format!("\"{path}\": no TIN surface found in LandXML"))?;

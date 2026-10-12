@@ -193,7 +193,7 @@ fn import_pnezd(host: &mut dyn HostApi, cmd: &str) {
     }
     let path = path.trim();
 
-    let text = match fs::read_to_string(path) {
+    let text = match read_text(path) {
         Ok(t) => t,
         Err(e) => {
             host.push_error(&format!("LS_PNEZD: cannot read \"{path}\": {e}"));
@@ -340,6 +340,12 @@ fn code_layer(code: &str) -> String {
         })
         .collect();
     format!("LS-PT-{safe}")
+}
+
+/// Read a text input file in whatever encoding it was exported in (UTF-8,
+/// UTF-16 with a BOM, or Windows-1252); see [`landsurvey::text::decode`].
+fn read_text(path: impl AsRef<std::path::Path>) -> std::io::Result<String> {
+    fs::read(path).map(|bytes| landsurvey::text::decode(&bytes))
 }
 
 /// Point-number text height scaled to the point set's 2-D extent, so labels
@@ -1383,7 +1389,7 @@ fn volume(host: &mut dyn HostApi, cmd: &str) {
 /// Y=Northing, Z=Elevation. Pure — returns `Err(message)` rather than touching
 /// the host, so it composes into both the reporting and resolving paths.
 fn read_surface_quiet(path: &str) -> Result<Surface, String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
     if landxml::looks_like_landxml(&text) {
         return landxml::read_first_surface(&text)
             .map(|ns| ns.surface)
@@ -1692,7 +1698,7 @@ fn helmert(host: &mut dyn HostApi, cmd: &str) {
         (rest, false, false, false, false)
     };
 
-    let text = match fs::read_to_string(path) {
+    let text = match read_text(path) {
         Ok(t) => t,
         Err(e) => {
             host.push_error(&format!("LS_HELMERT: cannot read \"{path}\": {e}"));
@@ -1809,7 +1815,7 @@ fn resect(host: &mut dyn HostApi, cmd: &str) {
     } else {
         (rest, false)
     };
-    let text = match fs::read_to_string(arg) {
+    let text = match read_text(arg) {
         Ok(t) => t,
         Err(e) => {
             host.push_error(&format!("LS_RESECT: cannot read \"{arg}\": {e}"));
