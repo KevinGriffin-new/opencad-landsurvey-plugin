@@ -10,6 +10,7 @@
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use landsurvey::label_style::LabelStyles;
 use landsurvey::surface::Surface;
 
 static STATE: OnceLock<Mutex<LandSurveyState>> = OnceLock::new();
@@ -41,6 +42,14 @@ pub struct LandSurveyState {
     /// When true, `LS_PNEZD` imports points WITHOUT drawing number labels
     /// (toggled by `LS_AUTOLABEL OFF`). Default false = auto-labels on.
     pub suppress_labels: bool,
+    /// MicroSurvey bearing/distance label styles (`LS_LABELSTYLE`); MSCAD's
+    /// shipped BEARING1/DISTANCE1 until a job's config.json is loaded.
+    pub label_styles: LabelStyles,
+    /// Plot scale `1:n` for sizing labels from their leroy; `None` sizes them
+    /// to the geometry instead.
+    pub label_scale: Option<f64>,
+    /// Imperial drawings take leroy heights in feet rather than metres.
+    pub label_imperial: bool,
     /// Units of the last LandXML import, reused by `LS_LANDXMLOUT` so an
     /// imperial file round-trips as imperial.
     pub landxml_units: Option<landsurvey::landxml::Units>,
