@@ -13,6 +13,7 @@ use ocs_plugin_api::host::{BuiltinPlugin, HostApi};
 use ocs_plugin_api::manifest::{ApiVersion, PluginManifest};
 use ocs_plugin_api::ribbon::CadModule;
 
+mod batch;
 mod dispatch;
 mod landxml_draw;
 mod ribbon;
