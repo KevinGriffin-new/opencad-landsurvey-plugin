@@ -8,12 +8,13 @@ use std::fs;
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::entities::Mesh;
 use acadrust::{
-    Arc as CadArc, Circle, EntityType, Line, LwPolyline, Point as CadPoint, Text, Vector2, Vector3,
+    Arc as CadArc, Circle, Color, EntityType, Line, LwPolyline, Point as CadPoint, Text, Vector2, Vector3,
 };
 
 use ocs_plugin_api::host::HostApi;
 
 
+use landsurvey::label_style::{self, LabelStyles};
 use landsurvey::surface::{self, Surface};
 use landsurvey::{cogo, landxml, plan, pnezd, resection, transform, viz};
 
@@ -57,6 +58,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
                  Import: LS_IMPORTPLAN, LS_LANDXML. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
+                 Labels: LS_LABELSTYLE. \
                  See PLUGIN.md for usage.",
             );
             true
@@ -75,6 +77,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_INVERSE" => {
             inverse(host, cmd);
+            true
+        }
+        "LS_LABELSTYLE" => {
+            label_style_cmd(host, cmd);
             true
         }
         "LS_VOLUME" => {
@@ -453,8 +459,19 @@ fn draw_inverse_line(host: &mut dyn HostApi, e1: f64, n1: f64, e2: f64, n2: f64,
     }
     let rot = deg.to_radians();
 
-    let h = (inv.distance / 20.0).max(1.0); // text height ~ 5% of the line
-    let gap = 0.4 * h; // clearance between each label body and the line
+    // Text, layer, colour and size come from the current MicroSurvey
+    // bearing/distance styles (LS_LABELSTYLE).
+    let (styles, scale, imperial) = {
+        let st = crate::state::state();
+        (st.label_styles.clone(), st.label_scale, st.label_imperial)
+    };
+    let (bs, ds) = (styles.bearing(), styles.distance());
+    // With a plot scale, size from leroy like MSCAD; without one, ~5% of the
+    // line at leroy 60, scaled by each style's leroy.
+    let height = |leroy: u32| match scale {
+        Some(s) => label_style::leroy_height(leroy, s, !imperial),
+        None => (inv.distance / 20.0).max(1.0) * leroy as f64 / 60.0,
+    };
 
     // Work in the TEXT's own frame so spacing is symmetric regardless of the
     // readable-flip. Text is baseline-anchored; glyphs rise from the baseline
@@ -464,29 +481,172 @@ fn draw_inverse_line(host: &mut dyn HostApi, e1: f64, n1: f64, e2: f64, n2: f64,
     // (−half-width along `read`).
     let read = (rot.cos(), rot.sin());
     let up = (-rot.sin(), rot.cos());
-    let d = gap + 0.5 * h;
 
     let labels = [
-        (cogo::azimuth_to_bearing(inv.azimuth_deg), 1.0_f64), // bearing, +up side
-        (format!("{:.3}", inv.distance), -1.0),               // distance, −up side
+        // bearing, +up side
+        (
+            label_style::format_bearing(inv.azimuth_deg, bs),
+            1.0_f64,
+            height(bs.leroy),
+            bs.textoffset,
+            bs.layername.as_str(),
+            bs.color,
+        ),
+        // distance, −up side
+        (
+            label_style::format_distance(inv.distance, ds),
+            -1.0,
+            height(ds.leroy),
+            ds.textoffset,
+            ds.layername.as_str(),
+            ds.color,
+        ),
     ];
-    for (text, sign) in labels {
+    for (text, sign, h, offset, layer, color) in labels {
+        // MsAnnotate's text offset is the clearance from the line in text heights.
+        let d = offset * h + 0.5 * h;
         let half_w = 0.5 * text.chars().count() as f64 * h * 0.6;
         let bx = mx + (sign * d - 0.5 * h) * up.0 - half_w * read.0;
         let by = my + (sign * d - 0.5 * h) * up.1 - half_w * read.1;
-        add_on_layer(
-            host,
-            EntityType::Text(
-                Text::with_value(text, Vector3::new(bx, by, 0.0))
-                    .with_height(h)
-                    .with_rotation(rot),
-            ),
-            LAYER,
+        let mut ent = EntityType::Text(
+            Text::with_value(text, Vector3::new(bx, by, 0.0))
+                .with_height(h)
+                .with_rotation(rot),
         );
+        ent.common_mut().color = Color::from_index(color);
+        add_on_layer(host, ent, layer);
     }
 
     host.bump_geometry();
     host.set_dirty();
+}
+
+/// `LS_LABELSTYLE` — show or change the MicroSurvey label styles used for
+/// bearing/distance labels:
+/// `LOAD <config.json | job.MSJ folder>`, `BEARING <n>` / `DISTANCE <n>`
+/// (1-based style number), `SCALE <n>` / `SCALE OFF` (plot scale 1:n for
+/// leroy sizing), `METRIC` / `IMPERIAL`, `RESET`.
+fn label_style_cmd(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_LABELSTYLE [LOAD <config.json|job.MSJ>] [BEARING <n>] \
+                         [DISTANCE <n>] [SCALE <n>|OFF] [METRIC|IMPERIAL] [RESET]";
+    let toks: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    let mut i = 0;
+    while i < toks.len() {
+        let key = toks[i].to_ascii_uppercase();
+        let arg = toks.get(i + 1).copied();
+        match key.as_str() {
+            "LOAD" => {
+                // Paths may contain spaces: LOAD takes the rest of the line.
+                let rest = toks[i + 1..].join(" ");
+                if rest.is_empty() {
+                    host.push_error(USAGE);
+                    return;
+                }
+                let mut path = std::path::PathBuf::from(rest.trim_matches('"'));
+                if path.is_dir() {
+                    path.push("config.json");
+                }
+                let loaded = fs::read_to_string(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|s| LabelStyles::from_msj_config(&s));
+                match loaded {
+                    Ok(styles) => crate::state::state().label_styles = styles,
+                    Err(e) => {
+                        host.push_error(&format!(
+                            "LS_LABELSTYLE: cannot load {}: {e}",
+                            path.display()
+                        ));
+                        return;
+                    }
+                }
+                i = toks.len();
+                continue;
+            }
+            "BEARING" | "DISTANCE" => {
+                let mut st = crate::state::state();
+                let count = if key == "BEARING" {
+                    st.label_styles.bearingstyles.len()
+                } else {
+                    st.label_styles.distancestyles.len()
+                };
+                let Some(n) = arg
+                    .and_then(|a| a.parse::<usize>().ok())
+                    .filter(|n| (1..=count).contains(n))
+                else {
+                    drop(st);
+                    host.push_error(&format!(
+                        "LS_LABELSTYLE: {key} takes a style number 1-{count}."
+                    ));
+                    return;
+                };
+                if key == "BEARING" {
+                    st.label_styles.bearingstyleindex = n - 1;
+                } else {
+                    st.label_styles.distancestyleindex = n - 1;
+                }
+                i += 2;
+                continue;
+            }
+            "SCALE" => {
+                let scale = match arg {
+                    Some(a) if a.eq_ignore_ascii_case("OFF") => None,
+                    Some(a) => match a.trim_start_matches("1:").parse::<f64>() {
+                        Ok(v) if v.is_finite() && v > 0.0 => Some(v),
+                        _ => {
+                            host.push_error("LS_LABELSTYLE: SCALE takes a positive number or OFF.");
+                            return;
+                        }
+                    },
+                    None => {
+                        host.push_error(USAGE);
+                        return;
+                    }
+                };
+                crate::state::state().label_scale = scale;
+                i += 2;
+                continue;
+            }
+            "METRIC" => crate::state::state().label_imperial = false,
+            "IMPERIAL" => crate::state::state().label_imperial = true,
+            "RESET" => {
+                let mut st = crate::state::state();
+                st.label_styles = LabelStyles::default();
+                st.label_scale = None;
+                st.label_imperial = false;
+            }
+            _ => {
+                host.push_error(&format!("LS_LABELSTYLE: unknown option \"{}\". {USAGE}", toks[i]));
+                return;
+            }
+        }
+        i += 1;
+    }
+
+    let st = crate::state::state();
+    let (b, d) = (st.label_styles.bearing(), st.label_styles.distance());
+    let size = match st.label_scale {
+        Some(s) => format!(
+            "plot scale 1:{s} ({})",
+            if st.label_imperial { "imperial" } else { "metric" }
+        ),
+        None => "sized to the line (no plot scale)".to_string(),
+    };
+    let msg = format!(
+        "LS_LABELSTYLE: bearing {} (layer {}, leroy {}, rounding {}\"), \
+         distance {} (layer {}, leroy {}, {} dp); {size}. Example: {}  {}",
+        b.name,
+        b.layername,
+        b.leroy,
+        b.rounding,
+        d.name,
+        d.layername,
+        d.leroy,
+        d.decimalplaces,
+        label_style::format_bearing(88.0 + 16.0 / 60.0 + 15.0 / 3600.0, b),
+        label_style::format_distance(36.0, d),
+    );
+    drop(st);
+    host.push_output(&msg);
 }
 
 /// Write an animated-SVG explainer to a temp folder and report the path so the
@@ -1720,6 +1880,66 @@ mod tests {
                 let _ = doc.app_ids.add(app);
             }
         }
+    }
+
+    /// LS_INVERSE draw labels with the current MicroSurvey styles, and
+    /// LS_LABELSTYLE LOAD switches them to a job's config.json styles. One
+    /// test, because the label styles live in process-global plugin state.
+    #[test]
+    fn inverse_draw_uses_msannotate_label_styles() {
+        fn labels(host: &TestHost) -> Vec<(String, String, Color, f64)> {
+            host.doc
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Text(t) => Some((
+                        t.value.clone(),
+                        e.common().layer.clone(),
+                        e.common().color,
+                        t.height,
+                    )),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        let mut host = TestHost::new();
+        label_style_cmd(&mut host, "LS_LABELSTYLE RESET");
+        // 36 m due east.
+        inverse(&mut host, "LS_INVERSE 1000 2000 1000 2036 draw");
+        let got = labels(&host);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0, "N90\u{b0}00'00\"E");
+        assert_eq!((got[0].1.as_str(), got[0].2), ("BEARING1", Color::from_index(1)));
+        assert_eq!(got[1].0, "36.00");
+        assert_eq!((got[1].1.as_str(), got[1].2), ("DISTANCE1", Color::from_index(3)));
+
+        let job = std::env::temp_dir().join(format!("ls_msj_{}", std::process::id()));
+        std::fs::create_dir_all(&job).expect("create job dir");
+        std::fs::write(
+            job.join("config.json"),
+            r#"{"bearingstyleindex":1,
+                "bearingstyles":[{"name":"BEARING1"},
+                  {"name":"BEARING2","layername":"BRG","color":2,"leroy":80,"quadrantspacing":1}],
+                "distancestyleindex":0,
+                "distancestyles":[{"name":"DISTANCE1","decimalplaces":3,"layername":"DST"}]}"#,
+        )
+        .expect("write config.json");
+
+        let mut host = TestHost::new();
+        label_style_cmd(&mut host, &format!("LS_LABELSTYLE LOAD {}", job.display()));
+        label_style_cmd(&mut host, "LS_LABELSTYLE SCALE 500");
+        inverse(&mut host, "LS_INVERSE 0 0 20 -0.6 draw");
+        label_style_cmd(&mut host, "LS_LABELSTYLE RESET");
+        let _ = std::fs::remove_dir_all(&job);
+
+        let got = labels(&host);
+        // quadrantspacing 1, plus MSCAD's space-padding of 1-digit degrees.
+        assert_eq!(got[0].0, "N  1\u{b0}43'06\" W");
+        assert_eq!((got[0].1.as_str(), got[0].2), ("BRG", Color::from_index(2)));
+        assert!((got[0].3 - 1.016).abs() < 1e-9, "leroy 80 at 1:500 = 1.016 m");
+        assert_eq!(got[1].0, "20.009");
+        assert_eq!(got[1].1, "DST");
+        assert!((got[1].3 - 0.762).abs() < 1e-9, "leroy 60 at 1:500 = 0.762 m");
     }
 
     /// LS_IMPORTPLAN with plat2json `--vectorize trace` output: the chain

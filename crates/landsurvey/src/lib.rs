@@ -7,6 +7,7 @@
 
 pub mod cogo;
 pub mod dxf;
+pub mod label_style;
 pub mod landxml;
 pub mod plan;
 pub mod pnezd;
