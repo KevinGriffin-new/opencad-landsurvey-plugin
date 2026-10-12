@@ -6,7 +6,7 @@ from pathlib import Path
 import subprocess
 import tomllib
 
-from repin_gates import current_host_pin, locked_package
+from repin_gates import current_host_pin, locked_codec
 
 
 def validate(root, rustc):
@@ -23,7 +23,9 @@ def validate(root, rustc):
 
 def generate(root, rustc):
     host = validate(root, rustc)
-    source = locked_package((root / "Cargo.lock").read_text(), "acadrust")["source"]
+    # The host still names the key `acadrust_source`; since v2026.39 its value
+    # is the opencadcodec package source (crates/ocs_plugin_api/build.rs).
+    source = locked_codec((root / "Cargo.lock").read_text())["source"]
     template = (root / "plugin.toml").read_text()
     # Metadata must belong to [opencad], regardless of later template sections.
     lines = ['rustc_version = ' + json.dumps(rustc),

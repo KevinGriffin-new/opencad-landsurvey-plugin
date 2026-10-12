@@ -14,6 +14,10 @@ gates was an upstream respelling that only a red nightly run could find:
       v0.9.8  ocs_plugin_api still declares the same shape, but the host ROOT
               adds [patch."https://github.com/.../cadcodec.git"] redirecting it
               to "https://git@github.com/.../cadcodec.git" at a different rev
+    v2026.39  the package is RENAMED: codec = { package = "opencadcodec",
+              git = ".../opencadcodec.git", rev = "..." }, imported under the
+              key `codec`. Every gate now finds "the codec" by package name
+              (acadrust or opencadcodec) under whatever key declares it.
 
 Each of those tags is a fixture under tests/fixtures/host/, asserted in
 tests/test_repin_gates.py. The rule that stops the cycle: a shape that breaks a
@@ -48,6 +52,13 @@ class Unparseable(Exception):
     """A gate could not evaluate its input — the gate itself needs updating."""
 
 
+# The CAD codec the host and plugin share, by package name. Upstream renamed the
+# package at v2026.39 (acadrust -> opencadcodec) and imports it under the key
+# `codec`, so the dependency KEY says nothing; only the package name identifies
+# it. A rename between the host and us is a source migration (every `use`
+# changes), never a pin bump.
+CODEC_PACKAGES = ("acadrust", "opencadcodec")
+
 # ----------------------------------------------------------------- lockfiles
 
 
@@ -70,6 +81,25 @@ def locked_package(lock_text: str, name: str) -> dict:
             "the plugin boundary are not the same types."
         )
     return found[0]
+
+
+def locked_codec(lock_text: str) -> dict:
+    """The single locked codec package, whichever name it goes by.
+
+    Both names in one lockfile is two codecs in one graph — the same ABI
+    failure as two builds of one name, so it escalates the same way.
+    """
+    doc = tomllib.loads(lock_text)
+    names = sorted({p.get("name") for p in doc.get("package", [])
+                    if p.get("name") in CODEC_PACKAGES})
+    if not names:
+        raise Unparseable(f"no codec package ({' / '.join(CODEC_PACKAGES)}) in the lockfile")
+    if len(names) > 1:
+        raise Escalate(
+            f"the lockfile carries both {' and '.join(names)}: two CAD codecs in one "
+            "graph, whose types do not interchange across the plugin boundary."
+        )
+    return locked_package(lock_text, names[0])
 
 
 GIT_SOURCE = re.compile(r"git\+(?P<url>[^?#]+)(?:\?[^#]*)?#(?P<rev>[0-9a-f]{40})")
@@ -98,8 +128,25 @@ def slug(url: str) -> str:
     return re.sub(r"\.git$", "", re.sub(r"^[a-z+]+://", "", url))
 
 
+def linked_codec(plugin_api_manifest: str) -> tuple[str, str, str]:
+    """(package, url, rev) of the codec exactly as ocs_plugin_api declares it."""
+    found = codec_dep(plugin_api_manifest)
+    if found is None:
+        raise Unparseable("no codec dependency (acadrust / opencadcodec) in "
+                          "ocs_plugin_api's [dependencies]")
+    _, package, dep = found
+    kind, value = dep_kind(dep, package)
+    if kind != "git":
+        raise Escalate(
+            f"ocs_plugin_api declares {package} as {value!r}, not a git pin. "
+            "Matching it needs a different mechanism than copying a rev."
+        )
+    url, rev = value  # type: ignore[misc]
+    return package, url, rev
+
+
 def linked_acadrust(plugin_api_manifest: str) -> tuple[str, str]:
-    """acadrust exactly as ocs_plugin_api declares it, url and rev string.
+    """The codec exactly as ocs_plugin_api declares it, url and rev string.
 
     Verbatim, because cargo's identity for a git source includes the literal
     `?rev=` text. `rev = "931c4ab"` and `rev = "931c4ab0c590...b139f"` resolve to
@@ -108,16 +155,7 @@ def linked_acadrust(plugin_api_manifest: str) -> tuple[str, str]:
     ocs_plugin_api, so its spelling is the one we have to match — not the host
     root manifest's, and not the lockfile's expanded sha.
     """
-    dep = declared_dep(plugin_api_manifest, "acadrust")
-    if dep is None:
-        raise Unparseable("no [dependencies].acadrust in ocs_plugin_api's manifest")
-    kind, value = dep_kind(dep)
-    if kind != "git":
-        raise Escalate(
-            f"ocs_plugin_api declares acadrust as {value!r}, not a git pin. "
-            "Matching it needs a different mechanism than copying a rev."
-        )
-    url, rev = value  # type: ignore[misc]
+    _, url, rev = linked_codec(plugin_api_manifest)
     return url, rev
 
 
@@ -127,6 +165,29 @@ def linked_acadrust(plugin_api_manifest: str) -> tuple[str, str]:
 def declared_dep(manifest_text: str, name: str, table: str = "dependencies"):
     """The raw `[table].name` value from a manifest, or None."""
     return tomllib.loads(manifest_text).get(table, {}).get(name)
+
+
+def codec_dep(manifest_text: str, table: str = "dependencies"):
+    """(key, package, value) of the codec dependency in `[table]`, or None.
+
+    Matched by package name — `codec = { package = "opencadcodec", ... }` and
+    `acadrust = { ... }` both qualify — because the key is the author's choice.
+    """
+    deps = tomllib.loads(manifest_text).get(table, {})
+    found = []
+    for key, dep in deps.items():
+        package = dep.get("package", key) if isinstance(dep, dict) else key
+        if package in CODEC_PACKAGES:
+            found.append((key, package, dep))
+    if not found:
+        return None
+    if len(found) > 1:
+        raise Escalate(
+            f"[{table}] declares more than one CAD codec "
+            f"({', '.join(k for k, _, _ in found)}); which one crosses the plugin "
+            "boundary is a decision."
+        )
+    return found[0]
 
 
 def dep_kind(dep, name: str = "acadrust") -> tuple[str, object]:
@@ -155,7 +216,7 @@ def dep_kind(dep, name: str = "acadrust") -> tuple[str, object]:
 # ------------------------------------------------------------------ patches
 
 
-def patch_entry(manifest_text: str, name: str = "acadrust"):
+def patch_entry(manifest_text: str, name: str | None = None):
     """The single `[patch."<url>"]` entry redirecting `name`, or None.
 
     Host v0.9.8 added one. ocs_plugin_api still declares acadrust at
@@ -173,7 +234,14 @@ def patch_entry(manifest_text: str, name: str = "acadrust"):
     Mirroring the redirect is the only way to land on the host's build.
     """
     patches = tomllib.loads(manifest_text).get("patch", {})
-    found = [(key, table[name]) for key, table in patches.items() if name in table]
+    names = (name,) if name is not None else CODEC_PACKAGES
+
+    def is_codec(entry: str, dep) -> bool:
+        package = dep.get("package", entry) if isinstance(dep, dict) else entry
+        return package in names
+
+    found = [(key, dep) for key, table in patches.items()
+             for entry, dep in table.items() if is_codec(entry, dep)]
     if not found:
         return None
     if len(found) > 1:
@@ -183,7 +251,7 @@ def patch_entry(manifest_text: str, name: str = "acadrust"):
             "redirect to mirror is a decision, not a copy."
         )
     key, dep = found[0]
-    kind, value = dep_kind(dep, name)
+    kind, value = dep_kind(dep, name or "the codec")
     if kind != "git":
         raise Escalate(
             f"the host patches {name} to a published version ({value!r}) rather "
@@ -196,7 +264,7 @@ def patch_entry(manifest_text: str, name: str = "acadrust"):
 def show_patch(patch) -> str:
     """A patch entry as one readable line, for gate messages."""
     if patch is None:
-        return "no [patch] for acadrust"
+        return "no [patch] for the codec"
     key, url, rev = patch
     return f'[patch."{key}"] -> "{url}" rev "{rev}"'
 
@@ -214,11 +282,17 @@ def host_acadrust_plan(plugin_api_manifest: str, host_manifest: str,
     about the wrong source. That is `Unparseable`, not a decision: it is a gap
     here, and canary.yml runs this against upstream `main` to find it early.
     """
-    declared_url, declared_rev = linked_acadrust(plugin_api_manifest)
-    locked_url, locked_rev = git_source(locked_package(host_lock, "acadrust"))
+    package, declared_url, declared_rev = linked_codec(plugin_api_manifest)
+    locked = locked_codec(host_lock)
+    if locked["name"] != package:
+        raise Unparseable(
+            f"ocs_plugin_api declares the codec as {package} but the host locks "
+            f"{locked['name']}. Something else is renaming the package."
+        )
+    locked_url, locked_rev = git_source(locked)
     patch = patch_entry(host_manifest)
 
-    plan = {"url": declared_url, "rev": declared_rev,
+    plan = {"package": package, "url": declared_url, "rev": declared_rev,
             "patch_key": "", "patch_url": "", "patch_rev": "",
             "locked_url": locked_url, "locked_rev": locked_rev}
 
@@ -251,10 +325,10 @@ def host_acadrust_plan(plugin_api_manifest: str, host_manifest: str,
 
 def effective_acadrust(manifest_text: str) -> tuple[str, str]:
     """The acadrust source a manifest resolves to, its own `[patch]` applied."""
-    dep = declared_dep(manifest_text, "acadrust")
-    if dep is None:
-        raise Unparseable("no [dependencies].acadrust in the manifest")
-    kind, value = dep_kind(dep)
+    found = codec_dep(manifest_text)
+    if found is None:
+        raise Unparseable("no codec dependency (acadrust / opencadcodec) in the manifest")
+    kind, value = dep_kind(found[2], found[1])
     if kind != "git":
         raise Unparseable("an effective git source is only defined for a git pin")
     url, rev = value  # type: ignore[misc]
@@ -330,14 +404,21 @@ def gate_acadrust(host_lock: str, our_manifest: str, our_lock: str | None = None
     no version at all, while the lockfile has always carried the resolved
     version, URL and rev in the same place.
     """
-    host = locked_package(host_lock, "acadrust")
+    host = locked_codec(host_lock)
     host_url, host_rev = git_source(host)
     host_ver = host["version"]
 
-    dep = declared_dep(our_manifest, "acadrust")
-    if dep is None:
-        raise Unparseable("no [dependencies].acadrust in the plugin manifest")
-    kind, value = dep_kind(dep)
+    found = codec_dep(our_manifest)
+    if found is None:
+        raise Unparseable("no codec dependency (acadrust / opencadcodec) in the plugin manifest")
+    _, our_package, dep = found
+    if our_package != host["name"]:
+        raise Escalate(
+            f"host {tag} ships the CAD codec as the {host['name']} package; we are "
+            f"built against {our_package}. A package rename changes every `use` in "
+            "the plugin — a source migration, not a re-pin."
+        )
+    kind, value = dep_kind(dep, our_package)
 
     if kind == "version":
         # Legacy shape: a crates.io requirement redirected by [patch.crates-io].
@@ -356,7 +437,7 @@ def gate_acadrust(host_lock: str, our_manifest: str, our_lock: str | None = None
                 "a git-pinned acadrust needs our Cargo.lock to know which "
                 "version we are built against"
             )
-        our_ver = locked_package(our_lock, "acadrust")["version"]
+        our_ver = locked_codec(our_lock)["version"]
         if compat_series(our_ver) != compat_series(host_ver):
             raise Escalate(
                 f"host {tag} locks acadrust {host_ver}; we are built against "
@@ -369,6 +450,7 @@ def gate_acadrust(host_lock: str, our_manifest: str, our_lock: str | None = None
         "host_url": host_url,
         "host_rev": host_rev,
         "host_slug": slug(host_url),
+        "host_package": host["name"],
         "our_version": our_ver,
         "our_kind": kind,
     }
@@ -391,11 +473,17 @@ def gate_source_identity(our_manifest: str, plugin_api_manifest: str,
 
     Preventive half of the ABI contract; gate_abi is the empirical half.
     """
-    want_url, want_rev = linked_acadrust(plugin_api_manifest)
-    dep = declared_dep(our_manifest, "acadrust")
-    if dep is None:
-        raise Unparseable("no [dependencies].acadrust in the plugin manifest")
-    kind, value = dep_kind(dep)
+    want_package, want_url, want_rev = linked_codec(plugin_api_manifest)
+    found = codec_dep(our_manifest)
+    if found is None:
+        raise Unparseable("no codec dependency (acadrust / opencadcodec) in the plugin manifest")
+    _, our_package, dep = found
+    if our_package != want_package:
+        raise Escalate(
+            f"ocs_plugin_api links the CAD codec as {want_package}; we declare "
+            f"{our_package}. A package rename is a source migration, not a re-pin."
+        )
+    kind, value = dep_kind(dep, our_package)
     if kind != "git":
         raise Escalate(
             "ocs_plugin_api pulls acadrust from git, so a crates.io requirement "
@@ -438,7 +526,7 @@ def gate_abi(our_lock: str, host_rev: str) -> dict:
     once ocs_plugin_api began pulling acadrust from git, [patch.crates-io]
     stopped applying to it, and the graph would have carried two acadrusts.
     """
-    pkg = locked_package(our_lock, "acadrust")  # raises Escalate on duplicates
+    pkg = locked_codec(our_lock)  # raises Escalate on duplicates / two codecs
     url, rev = git_source(pkg)
     if rev != host_rev:
         raise Escalate(
@@ -446,7 +534,7 @@ def gate_abi(our_lock: str, host_rev: str) -> dict:
             f"against {host_rev[:7]}. The loaded library would not share the "
             "host's types."
         )
-    return {"url": url, "rev": rev, "version": pkg["version"]}
+    return {"package": pkg["name"], "url": url, "rev": rev, "version": pkg["version"]}
 
 
 def gate_api_version(manifest_rs: str, plugin_toml: str, tag: str = "upstream") -> dict:
@@ -490,12 +578,16 @@ NO_PATCH = "# (the host declares no acadrust [patch] at this release)"
 PATCH_SENTINEL = "#<<<mirrored-acadrust-patch>>>"
 
 
-def render_patch_block(patch) -> str:
-    """The body between the markers: the host's redirect, or a note that there is none."""
+def render_patch_block(patch, package: str = "acadrust") -> str:
+    """The body between the markers: the host's redirect, or a note that there is none.
+
+    A `[patch]` entry is keyed by package name, so it names the codec package
+    (acadrust or opencadcodec) rather than our dependency key.
+    """
     if patch is None:
         return NO_PATCH
     key, url, rev = patch
-    return f'[patch."{key}"]\nacadrust = {{ git = "{url}", rev = "{rev}" }}'
+    return f'[patch."{key}"]\n{package} = {{ git = "{url}", rev = "{rev}" }}'
 
 
 def bump_patch(version: str) -> str:
@@ -536,19 +628,24 @@ def rewrite_manifests(cargo: str, plugin: str, *, tag: str, host_sha: str,
     # because cargo keys the git source on that literal text. Expanding it to
     # the full sha here would be a silent ABI break, which is why the pattern
     # accepts any hex length rather than demanding 40.
+    # The codec line in either spelling we have shipped:
+    #   acadrust = { git = "...", rev = "...", ... }
+    #   codec = { package = "opencadcodec", git = "...", rev = "...", ... }
+    # The package name itself is never rewritten — a rename is a migration.
     cargo, n = re.subn(
-        r'^(acadrust = \{ git = ")[^"]+(", rev = ")[0-9a-f]{7,40}(")',
+        r'^((?:acadrust|codec|opencadcodec) = \{ (?:package = "[^"]+", )?git = ")'
+        r'[^"]+(", rev = ")[0-9a-f]{7,40}(")',
         lambda m: m.group(1) + acad_url + m.group(2) + acad_rev + m.group(3),
         cargo, flags=re.M,
     )
     if n != 1:
-        raise Unparseable(f"expected 1 acadrust dependency to rewrite, rewrote {n}")
+        raise Unparseable(f"expected 1 codec dependency to rewrite, rewrote {n}")
 
     # Keep the pin comments honest: they name the release the revs came from.
     cargo = re.sub(r"Pinned to the v[\d.]+ RELEASE TAG commit",
                    f"Pinned to the {tag} RELEASE TAG commit", cargo)
-    cargo = re.sub(r"Match the v[\d.]+ release's acadrust",
-                   f"Match the {tag} release's acadrust", cargo)
+    cargo = re.sub(r"Match the v[\d.]+ release's (acadrust|codec)",
+                   lambda m: f"Match the {tag} release's {m.group(1)}", cargo)
 
     current = re.search(r'^version = "([\d.]+)"', cargo, re.M)
     if not current:
@@ -562,8 +659,9 @@ def rewrite_manifests(cargo: str, plugin: str, *, tag: str, host_sha: str,
     if n != 1:
         raise Unparseable(f"expected 1 api_version to rewrite, rewrote {n}")
 
-    # Mirror the host root's acadrust [patch], or clear ours when it has none.
-    body = render_patch_block(patch).replace("\n", eol)
+    # Mirror the host root's codec [patch], or clear ours when it has none.
+    package = (codec_dep(cargo.replace(PATCH_SENTINEL, "")) or (None, "acadrust"))[1]
+    body = render_patch_block(patch, package).replace("\n", eol)
     cargo = cargo.replace(PATCH_SENTINEL, PATCH_BEGIN + eol + body + eol + PATCH_END)
     return cargo, plugin, new
 
@@ -658,7 +756,11 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd == "current-pin":
             cargo = read(a.our_manifest)
             report = {"current_pin": current_host_pin(cargo)}
-            kind, value = dep_kind(declared_dep(cargo, "acadrust"))
+            found = codec_dep(cargo)
+            if found is None:
+                raise Unparseable("no codec dependency (acadrust / opencadcodec) in Cargo.toml")
+            kind, value = dep_kind(found[2], found[1])
+            report["current_codec_package"] = found[1]
             if kind == "git":
                 url, rev = value  # type: ignore[misc]
                 report |= {"current_acadrust_url": url, "current_acadrust_rev": rev,
@@ -667,7 +769,7 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "gate-acadrust":
             r = gate_acadrust(read(a.host_lock), read(a.our_manifest),
                               read(a.our_lock), a.tag)
-            print(f"host {a.tag} locks acadrust {r['host_version']} "
+            print(f"host {a.tag} locks {r['host_package']} {r['host_version']} "
                   f"({r['host_slug']}@{r['host_rev'][:7]}); we ship {r['our_version']}")
             emit({k: v for k, v in r.items() if k.startswith("host_")})
         elif a.cmd == "linked-acadrust":
@@ -677,12 +779,12 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "host-plan":
             r = host_acadrust_plan(read(a.plugin_api_manifest), read(a.host_manifest),
                                    read(a.host_lock))
-            print(f"ocs_plugin_api pins acadrust to {slug(r['url'])}@{r['rev']}")
+            print(f"ocs_plugin_api pins {r['package']} to {slug(r['url'])}@{r['rev']}")
             if r["patch_key"]:
                 print(f"host redirects it: [patch.\"{r['patch_key']}\"] -> "
                       f"{slug(r['patch_url'])}@{r['patch_rev'][:7]}")
             else:
-                print("host applies no acadrust [patch]")
+                print("host applies no codec [patch]")
             print(f"host ships {slug(r['locked_url'])}@{r['locked_rev'][:7]}")
             emit({"acadrust_url": r["url"], "acadrust_rev": r["rev"],
                   "acadrust_slug": slug(r["url"]),
@@ -692,12 +794,12 @@ def main(argv: list[str] | None = None) -> int:
             host_manifest = read(a.host_manifest) if a.host_manifest else None
             r = gate_source_identity(read(a.our_manifest), read(a.plugin_api_manifest),
                                      host_manifest)
-            print(f"acadrust source matches ocs_plugin_api: {slug(r['url'])}@{r['rev']}")
+            print(f"codec source matches ocs_plugin_api: {slug(r['url'])}@{r['rev']}")
             if "patch" in r:
                 print(f"patch mirrors the host: {r['patch']}")
         elif a.cmd == "gate-abi":
             r = gate_abi(read(a.our_lock), a.host_rev)
-            print(f"one acadrust {r['version']} at {r['rev'][:7]} ({r['url']})")
+            print(f"one {r['package']} {r['version']} at {r['rev'][:7]} ({r['url']})")
         elif a.cmd == "gate-api":
             r = gate_api_version(read(a.manifest_rs), read(a.plugin_toml), a.tag)
             print(f"host {a.tag} accepts [{r['min']}, {r['max']}]; "
