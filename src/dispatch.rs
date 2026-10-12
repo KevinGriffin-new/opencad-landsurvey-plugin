@@ -17,6 +17,7 @@ use ocs_plugin_api::host::HostApi;
 use landsurvey::label_style::{self, LabelStyles};
 use landsurvey::surface::{self, Surface};
 
+use crate::batch::Batch;
 use crate::landxml_draw;
 use landsurvey::{cogo, landxml, plan, pnezd, resection, transform, viz};
 
@@ -274,26 +275,25 @@ fn draw_survey_points(
     let off = marker * 0.5 + h * 0.3;
     let auto_label = !crate::state::state().suppress_labels;
 
-    let mut added = 0usize;
+    // One bulk add: per-point round trips made large files quadratic (#38).
+    let mut batch = Batch::new();
+    let mut starts = Vec::with_capacity(points.len());
     for p in points {
         let layer = code_layer(p.code());
         // World mapping: X = Easting, Y = Northing, Z = Elevation.
-        let mut pt =
-            EntityType::Point(CadPoint::at(Vector3::new(p.easting, p.northing, p.elevation)));
-        pt.common_mut().layer = layer.clone();
-        let handle = host.add_entity(pt);
-
-        // write_record registers the APPID so the tag round-trips through DWG/DXF.
+        let pt = EntityType::Point(CadPoint::at(Vector3::new(p.easting, p.northing, p.elevation)));
         let mut rec = ExtendedDataRecord::new(XDATA_POINT);
         rec.add_value(XDataValue::String(p.number.clone()));
         rec.add_value(XDataValue::String(p.description.clone()));
-        host.write_record(handle, rec);
+        starts.push(batch.len());
+        batch.add_tagged(pt, &layer, rec);
 
         if auto_label {
-            draw_point_label(host, p, h, off, &layer, detail);
+            draw_point_label(&mut batch, p, h, off, &layer, detail);
         }
-        added += 1;
     }
+    let accepted = batch.commit(host);
+    let added = starts.iter().filter(|&&i| i < accepted).count();
 
     let mut st = crate::state::state();
     st.imported += added;
@@ -360,7 +360,7 @@ fn label_height(points: &[pnezd::PnezdPoint]) -> f64 {
 /// elevation + description detail line below it when `show_detail` is set. Both
 /// go on `layer`.
 fn draw_point_label(
-    host: &mut dyn HostApi,
+    batch: &mut Batch,
     p: &pnezd::PnezdPoint,
     h: f64,
     off: f64,
@@ -369,8 +369,7 @@ fn draw_point_label(
 ) {
     let x = p.easting + off;
     let y = p.northing + off;
-    add_on_layer(
-        host,
+    batch.add(
         EntityType::Text(Text::with_value(p.number.clone(), Vector3::new(x, y, 0.0)).with_height(h)),
         layer,
     );
@@ -390,8 +389,7 @@ fn draw_point_label(
         detail.push_str(&p.description);
     }
     if !detail.is_empty() {
-        add_on_layer(
-            host,
+        batch.add(
             EntityType::Text(
                 Text::with_value(detail, Vector3::new(x, y - h * 1.3, 0.0)).with_height(h * 0.75),
             ),
@@ -1255,15 +1253,15 @@ fn datum_volume(host: &mut dyn HostApi, cmd: &str) {
 
     host.push_undo("LS_DATUM draw");
     let nt = draw_tin(host, &surf, "LS-TIN-DATUM", "DATUM");
-    let mut nl = 0usize;
+    let mut batch = Batch::new();
     for s in &contour {
         let ent = EntityType::Line(Line::from_points(
             Vector3::new(s[0][0], s[0][1], elev),
             Vector3::new(s[1][0], s[1][1], elev),
         ));
-        tag_surface(host, ent, "LS-DATUM", "DATUM", "CONTOUR");
-        nl += 1;
+        batch.add_tagged(ent, "LS-DATUM", surface_record("DATUM", "CONTOUR"));
     }
+    let nl = batch.commit(host);
     let (minx, maxx, miny, maxy) = surf.extent();
     let height = ((maxx - minx).max(maxy - miny) / 50.0).max(1.0);
     let ent = EntityType::Text(
@@ -1529,7 +1527,7 @@ fn layer_stem(path: &str) -> String {
 /// Draw a surface's unique TIN edges as 3-D `Line` entities on `layer`, each
 /// tagged `LANDSURVEY_SURFACE [name, "TIN"]`. Returns the edge count.
 fn draw_tin(host: &mut dyn HostApi, surf: &Surface, layer: &str, name: &str) -> usize {
-    let mut n = 0;
+    let mut batch = Batch::new();
     for e in surf.edges() {
         let a = surf.nodes[e[0]];
         let b = surf.nodes[e[1]];
@@ -1537,10 +1535,9 @@ fn draw_tin(host: &mut dyn HostApi, surf: &Surface, layer: &str, name: &str) -> 
             Vector3::new(a[0], a[1], a[2]),
             Vector3::new(b[0], b[1], b[2]),
         ));
-        tag_surface(host, ent, layer, name, "TIN");
-        n += 1;
+        batch.add_tagged(ent, layer, surface_record(name, "TIN"));
     }
-    n
+    batch.commit(host)
 }
 
 /// Draw plan-view 2-D segments (e.g. the cut/fill boundary) on `layer`.
@@ -1550,14 +1547,15 @@ fn draw_segments(
     layer: &str,
     name: &str,
 ) -> usize {
+    let mut batch = Batch::new();
     for s in segs {
         let ent = EntityType::Line(Line::from_points(
             Vector3::new(s[0][0], s[0][1], 0.0),
             Vector3::new(s[1][0], s[1][1], 0.0),
         ));
-        tag_surface(host, ent, layer, name, "CUTFILL");
+        batch.add_tagged(ent, layer, surface_record(name, "CUTFILL"));
     }
-    segs.len()
+    batch.commit(host)
 }
 
 /// Place a result label (cut/fill/net) at the centre of the top surface's
@@ -1579,10 +1577,15 @@ fn draw_volume_label(host: &mut dyn HostApi, top: &Surface, cf: &surface::CutFil
 fn tag_surface(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, name: &str, kind: &str) {
     ent.common_mut().layer = layer.to_string();
     let handle = host.add_entity(ent);
+    host.write_record(handle, surface_record(name, kind));
+}
+
+/// A `LANDSURVEY_SURFACE [name, kind]` record.
+fn surface_record(name: &str, kind: &str) -> ExtendedDataRecord {
     let mut rec = ExtendedDataRecord::new(XDATA_SURFACE);
     rec.add_value(XDataValue::String(name.to_string()));
     rec.add_value(XDataValue::String(kind.to_string()));
-    host.write_record(handle, rec);
+    rec
 }
 
 /// `LS_RTS <baseN> <baseE> <rot_deg> <scale> [<toN> <toE>]` — Rotate/Translate/
@@ -2212,11 +2215,23 @@ mod tests {
     struct TestHost {
         doc: CadDocument,
         log: Vec<String>,
+        /// Calls to `add_entity` / `add_entities`, for the batching tests.
+        single_adds: usize,
+        bulk_adds: usize,
+        /// Accept this many `add_entities` calls, then return no handles, as
+        /// the host does when a message is over its IPC size limit.
+        bulk_limit: Option<usize>,
     }
 
     impl TestHost {
         fn new() -> Self {
-            TestHost { doc: CadDocument::default(), log: Vec::new() }
+            TestHost {
+                doc: CadDocument::default(),
+                log: Vec::new(),
+                single_adds: 0,
+                bulk_adds: 0,
+                bulk_limit: None,
+            }
         }
     }
 
@@ -2231,7 +2246,18 @@ mod tests {
             &mut self.doc
         }
         fn add_entity(&mut self, entity: EntityType) -> codec::Handle {
+            self.single_adds += 1;
             self.doc.add_entity(entity).expect("add_entity")
+        }
+        fn add_entities(&mut self, entities: Vec<EntityType>) -> Vec<codec::Handle> {
+            self.bulk_adds += 1;
+            if self.bulk_limit.is_some_and(|limit| self.bulk_adds > limit) {
+                return Vec::new();
+            }
+            entities
+                .into_iter()
+                .map(|e| self.doc.add_entity(e).expect("add_entity"))
+                .collect()
         }
         fn bump_geometry(&mut self) {}
         fn read_record(
@@ -2252,9 +2278,21 @@ mod tests {
                 app.set_handle(self.doc.allocate_handle());
                 let _ = self.doc.app_ids.add(app);
             }
+            // Replace any record for the same app, as the host does.
             match self.doc.get_entity_mut(handle) {
                 Some(e) => {
-                    e.common_mut().extended_data.add_record(record);
+                    let xd = &mut e.common_mut().extended_data;
+                    let kept: Vec<_> = xd
+                        .records()
+                        .iter()
+                        .filter(|r| r.application_name != record.application_name)
+                        .cloned()
+                        .collect();
+                    xd.clear();
+                    for r in kept {
+                        xd.add_record(r);
+                    }
+                    xd.add_record(record);
                     true
                 }
                 None => false,
@@ -2304,6 +2342,80 @@ mod tests {
         fn document_reader(&self) -> Box<dyn ocs_plugin_api::host::DocumentReader + '_> {
             unimplemented!("not exercised by these tests")
         }
+    }
+
+
+    /// Write `n` PNEZD rows to a temp file and return its path.
+    fn pnezd_file(tag: &str, n: usize) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("ls_pnezd_{tag}_{}.csv", std::process::id()));
+        let mut text = String::new();
+        for i in 1..=n {
+            let code = ["IP", "TOPO", "EP"][i % 3];
+            text.push_str(&format!("{i},{},{},{},{code}\n", 5000.0 + i as f64, 1000.0 + (i % 97) as f64, 100.0));
+        }
+        std::fs::write(&path, text).expect("write pnezd");
+        path
+    }
+
+    /// #38: a large import goes through `add_entities` in chunks, with no
+    /// per-entity round trips, and every point keeps exactly one tag (the
+    /// APPID re-write on the first point must replace, not duplicate).
+    #[test]
+    fn pnezd_import_is_batched_and_keeps_tags() {
+        let n = 6_000; // with labels, 12 000 entities: three chunks
+        let src = pnezd_file("batch", n);
+        let mut host = TestHost::new();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+        let _ = std::fs::remove_file(&src);
+
+        assert!(!host.log.iter().any(|l| l.starts_with("ERROR")), "{:?}", host.log);
+        assert!(host.log.iter().any(|l| l.contains(&format!("imported {n} labeled point(s)"))), "{:?}", host.log);
+        assert_eq!(host.single_adds, 0, "per-entity add_entity calls are back");
+        assert_eq!(host.bulk_adds, (2 * n).div_ceil(crate::batch::CHUNK));
+        assert!(host.doc.app_ids.contains(XDATA_POINT), "APPID not registered");
+
+        let mut seen = 0;
+        for e in host.doc.entities() {
+            if let EntityType::Point(_) = e {
+                let records = e.common().extended_data.records();
+                assert_eq!(records.iter().filter(|r| r.application_name == XDATA_POINT).count(), 1);
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, n);
+
+        // The tag on a batched point survives DWG save and reopen.
+        let first = host
+            .doc
+            .entities()
+            .find(|e| matches!(e, EntityType::Point(_)))
+            .map(|e| e.common().handle)
+            .expect("a point");
+        let bytes = DwgWriter::write_to_vec(&host.doc).expect("dwg write");
+        let rt = DwgReader::from_stream(Cursor::new(bytes)).read().expect("dwg read");
+        let tag = named_tag(rt.get_entity(first).expect("point after reopen"), XDATA_POINT);
+        assert_eq!(tag, Some(("1".to_string(), "TOPO".to_string())));
+    }
+
+    /// When the host drops a chunk, the import says so and counts only the
+    /// points that landed.
+    #[test]
+    fn pnezd_import_reports_a_refused_chunk() {
+        let n = 6_000;
+        let src = pnezd_file("short", n);
+        let mut host = TestHost::new();
+        host.bulk_limit = Some(1);
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+        let _ = std::fs::remove_file(&src);
+
+        let accepted = crate::batch::CHUNK;
+        assert!(
+            host.log.iter().any(|l| l.contains(&format!("accepted {accepted} of {} entities", 2 * n))),
+            "{:?}",
+            host.log
+        );
+        // Point + label per row: the first chunk holds half as many points.
+        assert!(host.log.iter().any(|l| l.contains(&format!("imported {} labeled point(s)", accepted / 2))), "{:?}", host.log);
     }
 
     /// Register the LANDSURVEY_* APPIDs with real handles, as the fixed host
