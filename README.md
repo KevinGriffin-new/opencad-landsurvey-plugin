@@ -11,6 +11,8 @@ exports the two C symbols the host loader expects (via
 - **Points** — PNEZD / PENZD import (delimiter and encoding auto-detected, alphanumeric
   names kept, optional preview); labeled points grouped onto per-feature-code
   layers; bearing/distance line labels via `LS_INVERSE … draw`; a point list.
+- **Field data** — data collector raw files (TDS / Carlson **RW5**, FieldGenius `.raw`,
+  SurvCE) reduced to coordinates with per-setup backsight and check-shot QC.
 - **Field-to-finish** — connect coded points into linework (`LS_FINISH`):
   string-numbered codes (`ER1`, `BLDG2`) or MicroSurvey XYZ prefix coding.
 - **Surface** — build a TIN from PNEZD or **LandXML**; surface-to-surface and

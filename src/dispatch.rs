@@ -19,7 +19,7 @@ use landsurvey::surface::{self, Surface};
 
 use crate::batch::Batch;
 use crate::landxml_draw;
-use landsurvey::{cogo, landxml, plan, pnezd, resection, transform, viz};
+use landsurvey::{cogo, landxml, plan, pnezd, resection, rw5, transform, viz};
 
 /// XDATA application carrying survey metadata on a `Point` entity.
 /// Record values: `[String(point_number), String(description)]`.
@@ -71,7 +71,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
     match verb {
         "LS_HELLO" => {
             host.push_info(
-                "Land Survey plugin ready. Points: LS_PNEZD, LS_LIST, LS_AUTOLABEL. \
+                "Land Survey plugin ready. Points: LS_PNEZD, LS_RW5, LS_LIST, LS_AUTOLABEL. \
                  Field-to-finish: LS_FINISH. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
@@ -83,6 +83,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_PNEZD" => {
             import_pnezd(host, cmd);
+            true
+        }
+        "LS_RW5" => {
+            import_rw5(host, cmd);
             true
         }
         "LS_AUTOLABEL" => {
@@ -921,6 +925,100 @@ fn import_landxml(host: &mut dyn HostApi, cmd: &str) {
 
 /// LandXML COGO points become ordinary Land Survey points. The description
 /// leads with the feature code so `LS-PT-<CODE>` layering still works.
+/// `LS_RW5 <field.raw|rw5> [detail] [preview]` — reduce a FieldGenius / TDS /
+/// SurvCE raw data file to coordinates and import the points like `LS_PNEZD`
+/// (labels, `LS-PT-<CODE>` layers, `LANDSURVEY_POINT` XDATA). Each setup's
+/// QC is reported: the station coordinates the collector stored against ours,
+/// the backsight distance and elevation checks, and repeated shots of a
+/// point (check shots, face 2). `preview` reports without drawing.
+fn import_rw5(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_RW5 <field.raw|rw5> [detail] [preview]";
+    let (path, flags) = peel_keywords(first_arg(cmd), &["detail", "preview"]);
+    if path.is_empty() {
+        host.push_info(USAGE);
+        return;
+    }
+    let text = match read_text(path) {
+        Ok(t) => t,
+        Err(e) => {
+            host.push_error(&format!("LS_RW5: cannot read \"{path}\": {e}"));
+            return;
+        }
+    };
+    let r = rw5::reduce(&text);
+    if r.points.is_empty() {
+        host.push_error(&format!(
+            "LS_RW5: no points reduced from \"{path}\". {}",
+            r.warnings.join("; ")
+        ));
+        return;
+    }
+    let unit = match r.unit {
+        rw5::Unit::Metre => "m",
+        rw5::Unit::Feet => "ft",
+        rw5::Unit::UsSurveyFoot => "US ft",
+    };
+    let preview = flags.iter().any(|f| f == "preview");
+    if !preview {
+        let points: Vec<pnezd::PnezdPoint> = r
+            .points
+            .iter()
+            .map(|p| pnezd::PnezdPoint {
+                number: p.name.clone(),
+                northing: p.northing,
+                easting: p.easting,
+                elevation: p.elevation,
+                description: p.description.clone(),
+            })
+            .collect();
+        host.push_undo("LS_RW5 import");
+        draw_survey_points(host, &points, flags.iter().any(|f| f == "detail"));
+        host.bump_geometry();
+        host.set_dirty();
+    }
+    host.push_output(&format!(
+        "LS_RW5{}: job {} - {} point(s) from {} setup(s), units {unit}.",
+        if preview { " preview" } else { "" },
+        if r.job.is_empty() { "?" } else { &r.job },
+        r.points.len(),
+        r.setups.len()
+    ));
+    for s in &r.setups {
+        let mut line = format!(
+            "  setup {} -> BS {}",
+            s.station,
+            s.backsight.as_deref().unwrap_or("-")
+        );
+        if let Some(d) = s.stored_delta {
+            line.push_str(&format!(
+                "  stored vs ours dN {} dE {} dZ {}",
+                rw5::fmt_delta(d[0]),
+                rw5::fmt_delta(d[1]),
+                rw5::fmt_delta(d[2])
+            ));
+        }
+        if let (Some(h), Some(z)) = (s.bs_distance_error, s.bs_elevation_error) {
+            line.push_str(&format!(
+                "  BS check dHD {} dZ {}",
+                rw5::fmt_delta(h),
+                rw5::fmt_delta(z)
+            ));
+        }
+        host.push_output(&line);
+    }
+    for rep in &r.repeats {
+        host.push_output(&format!(
+            "  repeat of {}: dH {:.4} dZ {} (first observation kept)",
+            rep.name,
+            rep.dh,
+            rw5::fmt_delta(rep.dz)
+        ));
+    }
+    for w in &r.warnings {
+        host.push_info(&format!("LS_RW5: {w}"));
+    }
+}
+
 fn import_landxml_points(host: &mut dyn HostApi, points: &[landxml::CgPoint]) {
     if points.is_empty() {
         return;
@@ -3035,6 +3133,56 @@ mod tests {
             back.alignments.iter().map(|a| a.cross_sections.len()).sum::<usize>(),
             host.doc.entities().count()
         );
+    }
+
+    /// LS_RW5 reduces a raw file into labelled Land Survey points and reports
+    /// each setup's QC; `preview` draws nothing.
+    #[test]
+    fn rw5_import_draws_points_and_reports_setups() {
+        const RAW: &str = "\
+JB,NMDEMO,DT10-23-2010,TM23:14:07
+MO,AD0,UN1,SF1.000000,EC0,EO0.0,AU0
+LS,HI1.651,HR0.107
+NEZ,OP27,200.000,200.000,50.000
+OC,OP27,N 200.0000,E 200.0000,EL50.0000,--TH CN
+BK,OP27,BP99,BS180.00000,BC0.00000
+SS,OP27,FP33,AR202.41320,ZE90.11050,SD45.2564,--TH CN
+SS,OP27,FP40,AR90.00000,ZE90.00000,SD10.0000,--OIP LOT 28
+LS,HI1.655,HR0.107
+OC,OP33,N 241.7529,E 217.4590,EL51.3981,--TH CN
+BK,OP33,BP27,BS202.41320,BC0.00000
+BR,OP33,BP27,AR0.00000,ZE93.43130,SD45.3524
+SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
+";
+        let path = std::env::temp_dir().join(format!("ls_rw5_{}.raw", std::process::id()));
+        std::fs::write(&path, RAW).expect("write raw");
+
+        let mut host = TestHost::new();
+        import_rw5(&mut host, &format!("LS_RW5 {} preview", path.display()));
+        assert_eq!(host.doc.entities().count(), 0);
+        assert!(host.log.iter().any(|l| l.contains("3 point(s) from 2 setup(s)")), "{:?}", host.log);
+
+        let mut host = TestHost::new();
+        import_rw5(&mut host, &format!("LS_RW5 {}", path.display()));
+        let _ = std::fs::remove_file(&path);
+        let points: Vec<_> = host
+            .doc
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Point(p) => Some((named_tag(e, XDATA_POINT).unwrap().0, p.location, e.common().layer.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(points.len(), 3);
+        let p33 = points.iter().find(|p| p.0 == "33").unwrap();
+        assert!((p33.1.y - 241.7529).abs() < 5e-5 && (p33.1.x - 217.4590).abs() < 5e-5);
+        assert_eq!(p33.2, "LS-PT-TH");
+        assert!(points.iter().any(|p| p.0 == "40" && p.2 == "LS-PT-OIP"));
+        // QC: FieldGenius' stored station agrees, the BS check and the check
+        // shot back to 27 are reported.
+        assert!(host.log.iter().any(|l| l.contains("setup 33 -> BS 27") && l.contains("stored vs ours dN +0.0000")), "{:?}", host.log);
+        assert!(host.log.iter().any(|l| l.contains("BS check dHD +0.0007")), "{:?}", host.log);
+        assert!(host.log.iter().any(|l| l.contains("repeat of 27")), "{:?}", host.log);
     }
 
     #[test]
