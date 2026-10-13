@@ -24,7 +24,7 @@ USAGE:
   landsurvey-cli resect  <shots.csv> [-o out.dxf]
   landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
   landsurvey-cli raw     <field.raw|rw5|sdr> [--csv out.csv]   (alias: rw5)
-  landsurvey-cli finish  <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]
+  landsurvey-cli finish  <points.csv> [--library automap.csv] [--mode strings|xyz] [--order shot|number] [-o out.dxf]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
 LandXML (auto-detected). rts = Rotate/Translate/Scale about a base point (CCW+);
@@ -659,14 +659,22 @@ fn read_surface(path: &str) -> Result<Surface, String> {
     Ok(Surface::from_points(&nodes))
 }
 
-/// `finish <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]`
-/// — connect coded points into figures, list them, and draw them to a DXF.
+/// `finish <points.csv> [--library automap.csv] [--mode strings|xyz]
+/// [--order shot|number] [-o out.dxf]` — connect coded points into figures,
+/// list them, and draw them to a DXF (on the library's layers, when given).
 fn cmd_finish(args: &[String]) -> Result<String, String> {
     use landsurvey::finish::{self, Mode, Options, Order};
-    let (pos, opts) = split_args(args, &["--mode", "--order", "-o", "--out"]);
+    let (pos, opts) = split_args(args, &["--library", "--mode", "--order", "-o", "--out"]);
     let path = pos
         .first()
-        .ok_or("usage: finish <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]")?;
+        .ok_or("usage: finish <points.csv> [--library automap.csv] [--mode strings|xyz] [--order shot|number] [-o out.dxf]")?;
+    let library = match opts.get("library") {
+        Some(l) => {
+            let text = read_text(l).map_err(|e| format!("cannot read \"{l}\": {e}"))?;
+            Some(landsurvey::library::Library::parse(&text).map_err(|e| format!("\"{l}\": {e}"))?)
+        }
+        None => None,
+    };
     let mut o = Options::default();
     match opts.get("mode").map(String::as_str) {
         None | Some("strings") => {}
@@ -691,7 +699,7 @@ fn cmd_finish(args: &[String]) -> Result<String, String> {
             description: p.description,
         })
         .collect();
-    let lw = finish::build(&points, &o);
+    let lw = finish::build_with(&points, &o, library.as_ref());
 
     let mut d = DxfBuilder::new();
     d.add_layer("LS-POINTS", 7);
@@ -700,7 +708,12 @@ fn cmd_finish(args: &[String]) -> Result<String, String> {
     }
     let mut out = format!("{} figure(s) from {} point(s)\n", lw.figures.len(), points.len());
     for f in &lw.figures {
-        let layer = format!("LS-LN-{}", f.code);
+        let layer = library
+            .as_ref()
+            .zip(f.row)
+            .map(|(l, r)| l.codes[r].line_layer.clone())
+            .filter(|l| !l.is_empty())
+            .unwrap_or_else(|| format!("LS-LN-{}", f.code));
         d.add_layer(&layer, 2);
         let xy = |v: &finish::Vertex| [points[v.point].easting, points[v.point].northing, 0.0];
         for w in f.vertices.windows(2) {

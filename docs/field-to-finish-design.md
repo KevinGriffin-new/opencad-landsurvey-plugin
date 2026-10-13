@@ -1,8 +1,28 @@
 # Field-to-finish: linework and symbols — design
 
-Status: **phase 1 built** (`landsurvey::finish`, `LS_FINISH lines`): string-numbered
-and XYZ coding, ordering, closure, `Y` spurs, `*` joins, re-run safety. Later
-phases are still design.
+Status: **phases 1 and 2 built.** Phase 1 (`landsurvey::finish`, `LS_FINISH lines`):
+string-numbered and XYZ coding, ordering, closure, `Y` spurs, `*` joins, re-run
+safety. Phase 2 (`landsurvey::library`, `LS_LIBRARY`): AutoMAP CSV libraries with
+connect, line layer, colour, linetype, 2D/3D and width, AutoMAP lookup and
+wildcards. Later phases are still design.
+
+Notes from building phase 2:
+
+- AutoMAP treats `COLOR` and `LINE TYPE` as the properties of the line layer
+  it creates. Phase 2 sets them on each figure instead, and the host registers
+  the layer with default properties when a figure first uses it. Creating the
+  layers properly is a host-scripting follow-up; see "Host scripting" below. A linetype the drawing has not loaded is left
+  by layer and reported, because the DWG writer can only reference loaded
+  linetypes.
+- `COLOR` 0 (by block) and 256 (by layer) both mean "by layer"; 1–255 are
+  colour indexes. MicroSurvey's own libraries use all three.
+- `LINES` (individual lines vs polyline) is read but not used; figures are
+  always polylines.
+- MicroSurvey ships linework libraries to test against (`default.csv`,
+  `feature_demo.csv`, `leica-code-list.csv`, `nikon.csv`, `survey.csv` in
+  `ProgramData\MicroSurvey\MSCAD\2027\mscad`); all of them parse, and the
+  Lab 8 strings connect only where a library has the code (`BLDG1` via
+  `BLDG` in `default.csv`, `GL1` exactly in `nikon.csv`).
 
 ## Goal
 
@@ -333,7 +353,7 @@ there are two ways to draw a symbol:
 | | how | pros | cons |
 |---|---|---|---|
 | **A. Plain geometry (phase 3)** | Transform the symbol's lines, arcs, circles and polylines to the point (scale, rotate, move) and add each as an entity, tagged `LANDSURVEY_SYMBOL [point, code, symbol]` | works on the current host, no host change | not a real block: cannot be redefined in one place; larger drawings; harder to select as one object |
-| **B. Real blocks (later)** | Define each symbol once as a block, then add one `Insert` per point | how MicroSurvey and Civil 3D do it; small drawings; redefine in one place | needs a new host call (define a block), an API bump, and a coordinated plugin release, since the plugin is pinned to the exact host build |
+| **B. Real blocks** | Define each symbol once as a block, then add one `Insert` per point | how MicroSurvey and Civil 3D do it; small drawings; redefine in one place | **no host change needed after all:** API v7 (v2026.41, the pinned host) has `TableOperation::BlockCreate`, which defines a block from drawing entities; see "Host scripting" below |
 
 **Proposal:** ship A first, and propose B to OpenCADStudio in parallel. The
 `LANDSURVEY_SYMBOL` tag lets a later version replace A's geometry with
@@ -387,6 +407,35 @@ Symbols do not depend on the coding mode: they always match the base code.
   the exporter already supports, so linework reaches Civil 3D and
   MicroSurvey. Symbols are not exported; the receiving program places its
   own from the point codes.
+
+### Host scripting (to do)
+
+Some of what AutoMAP does to a drawing is table work, not entity work:
+creating layers with a colour and linetype, loading linetypes, defining
+blocks. Phase 2 assumed an out-of-process plugin could not do it. That is out
+of date. The pinned host (v2026.41, plugin API v7) can be scripted from the
+plugin, over the same IPC connection as `add_entity`:
+
+| need | host call (API v7) | use |
+|---|---|---|
+| layer with properties | `HostApi::add_layer(LayerConfig { name, color, linetype, lineweight, … })`, or `table_operation(TableOperation::LayerCreate { config })` | create each AutoMAP `LINE LAYER` (and later `SYM LAYER`, `DESC LAYER`) with the row's `COLOR` and `LINE TYPE`, as MicroSurvey does, instead of styling every figure |
+| change an existing layer | `modify_layer` / `TableOperation::LayerModify` | leave existing layers alone by default; offer an option to update them |
+| define a block | `TableOperation::BlockCreate` (from entities, with `erase_originals`) | real symbol blocks for phase 3 (option B above): draw a symbol once, define it, insert it per point |
+| anything else | `execute_command(cmd)` (command line, AutoLISP / script style) and `run_command(CommandRequest)` | e.g. loading a missing linetype from a `.lin` file, if the host has a command for it; to be checked |
+
+To do:
+
+1. Before drawing, create any missing figure layer with `add_layer`, taking
+   colour and linetype from the library row; set colour and linetype on the
+   figure only when the layer already existed with different properties.
+2. Find out whether the host can load a linetype by name (a `LINETYPE` load
+   command through `execute_command`), so `CENTER`, `HIDDEN` and the like
+   work in a blank drawing.
+3. Use `BlockCreate` for symbols in phase 3 (option B), not exploded
+   geometry.
+4. The test host returns "not supported" for all of these (the trait
+   defaults), so the glue must fall back to today's behaviour, and the
+   field-test suite (real host) is where the scripted path gets checked.
 
 ### 6. Phases
 

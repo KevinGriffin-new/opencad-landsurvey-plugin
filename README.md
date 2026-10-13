@@ -15,7 +15,9 @@ exports the two C symbols the host loader expects (via
   SurvCE; **Sokkia SDR**) reduced to coordinates with per-setup backsight and
   check-shot QC.
 - **Field-to-finish** — connect coded points into linework (`LS_FINISH`):
-  string-numbered codes (`ER1`, `BLDG2`) or MicroSurvey XYZ prefix coding.
+  string-numbered codes (`ER1`, `BLDG2`) or MicroSurvey XYZ prefix coding, styled
+  by a MicroSurvey AutoMAP code library (`LS_LIBRARY`): layers, colours,
+  linetypes, 2D or 3D.
 - **Surface** — build a TIN from PNEZD or **LandXML**; surface-to-surface and
   surface-to-datum **earthwork volumes** (exact TIN overlay + grid method) with
   drawn TINs, cut/fill lines, and result labels.
