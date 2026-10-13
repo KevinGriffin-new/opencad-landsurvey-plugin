@@ -415,6 +415,9 @@ jobs:
     uses: ./.github/workflows/release.yml
     permissions:
       contents: write
+    # release.yml signs and notarizes the macOS dylib; called workflows see
+    # none of the caller's secrets unless they are passed on.
+    secrets: inherit
     with:
       tag: ${{ needs.repin.outputs.release_tag }}
 
