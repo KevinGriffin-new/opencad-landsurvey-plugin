@@ -6,7 +6,7 @@
 use std::fs;
 
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::entities::Mesh;
+use codec::entities::{Mesh, Polyline3D};
 use codec::{
     Arc as CadArc, Circle, Color, EntityType, Line, LwPolyline, Point as CadPoint, Text, Vector2, Vector3,
 };
@@ -72,7 +72,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         "LS_HELLO" => {
             host.push_info(
                 "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL. \
-                 Field-to-finish: LS_FINISH. \
+                 Field-to-finish: LS_FINISH, LS_LIBRARY. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
@@ -146,6 +146,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_FINISH" => {
             finish(host, cmd);
+            true
+        }
+        "LS_LIBRARY" => {
+            library_cmd(host, cmd);
             true
         }
         _ => false,
@@ -1170,6 +1174,17 @@ fn export_landxml(host: &mut dyn HostApi, cmd: &str) {
                         elevation: Some(p.location.z),
                         code,
                         desc,
+                    });
+                }
+            }
+            EntityType::Polyline3D(pl) if want("features") => {
+                if let Some((name, desc)) = named_tag(e, XDATA_FIGURE) {
+                    let verts: Vec<(f64, f64, f64)> =
+                        pl.vertices.iter().map(|v| (v.position.x, v.position.y, 0.0)).collect();
+                    doc.features.push(landxml::PlanFeature {
+                        name,
+                        desc,
+                        segments: landxml::polyline_segments(&verts, pl.flags.closed),
                     });
                 }
             }
@@ -2270,7 +2285,9 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
     tagged.sort_by_key(|(h, _)| *h);
     let points: Vec<_> = tagged.into_iter().map(|(_, p)| p).collect();
 
-    let lw = landsurvey::finish::build(&points, &opts);
+    let library = crate::state::state().code_library.clone();
+    let lib = library.as_ref().map(|(_, l)| l);
+    let lw = landsurvey::finish::build_with(&points, &opts, lib);
     let mode = match opts.mode {
         landsurvey::finish::Mode::Strings => "string-numbered codes",
         landsurvey::finish::Mode::Xyz => "XYZ prefix codes",
@@ -2286,32 +2303,75 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
         host.push_undo("LS_FINISH");
         let n = old.iter().filter(|&&h| host.remove_entity(h)).count();
         let mut batch = Batch::new();
+        let mut missing_linetypes = std::collections::BTreeSet::new();
         for f in &lw.figures {
-            let verts: Vec<(f64, f64, f64)> = f
-                .vertices
-                .iter()
-                .map(|v| (points[v.point].easting, points[v.point].northing, 0.0))
-                .collect();
+            let style = lib.zip(f.row).map(|(l, r)| &l.codes[r]);
+            let mut ent = if style.is_some_and(|c| c.three_d) {
+                let at = |v: &landsurvey::finish::Vertex| {
+                    let p = &points[v.point];
+                    Vector3::new(p.easting, p.northing, p.elevation)
+                };
+                let mut pl = Polyline3D::from_points(f.vertices.iter().map(at).collect());
+                pl.flags.closed = f.closed;
+                EntityType::Polyline3D(pl)
+            } else {
+                let verts: Vec<(f64, f64, f64)> = f
+                    .vertices
+                    .iter()
+                    .map(|v| (points[v.point].easting, points[v.point].northing, 0.0))
+                    .collect();
+                let mut lw = lwpolyline(&verts, f.closed);
+                lw.constant_width = style.map_or(0.0, |c| c.width);
+                EntityType::LwPolyline(lw)
+            };
+            if let Some(c) = style {
+                if let Some(aci) = c.color {
+                    ent.common_mut().color = Color::from_index(aci);
+                }
+                let lt = c.line_type.trim();
+                if !lt.is_empty() && !["CONTINUOUS", "BYLAYER"].contains(&lt.to_ascii_uppercase().as_str()) {
+                    // A linetype the drawing has not loaded would not survive
+                    // a save; leave it by layer and say so.
+                    if host.document().line_types.contains(lt) {
+                        ent.common_mut().linetype = lt.to_string();
+                    } else {
+                        missing_linetypes.insert(lt.to_ascii_uppercase());
+                    }
+                }
+            }
             let first = &points[f.vertices[0].point].name;
             let last = &points[f.vertices[f.vertices.len() - 1].point].name;
             let mut rec = ExtendedDataRecord::new(XDATA_FIGURE);
             for v in [&f.string, &f.code, first, last, &f.vertices.len().to_string()] {
                 rec.add_value(XDataValue::String(v.clone()));
             }
-            let layer = format!("LS-LN-{}", layer_safe(&f.code));
-            batch.add_tagged(EntityType::LwPolyline(lwpolyline(&verts, f.closed)), &layer, rec);
+            let layer = match style.map(|c| c.line_layer.trim()).filter(|l| !l.is_empty()) {
+                Some(l) => layer_name_safe(l),
+                None => format!("LS-LN-{}", layer_safe(&f.code)),
+            };
+            batch.add_tagged(ent, &layer, rec);
         }
         batch.commit(host);
+        if !missing_linetypes.is_empty() {
+            host.push_info(&format!(
+                "LS_FINISH: linetype(s) {} are not loaded in this drawing; those figures use their layer's linetype.",
+                missing_linetypes.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
         host.bump_geometry();
         host.set_dirty();
         n
     };
 
     host.push_output(&format!(
-        "LS_FINISH{}: {} figure(s) from {} point(s), {mode}, {order}.{}",
+        "LS_FINISH{}: {} figure(s) from {} point(s), {mode}, {order}, {}.{}",
         if preview { " preview" } else { "" },
         lw.figures.len(),
         points.len(),
+        match &library {
+            Some((name, _)) => format!("library {name}"),
+            None => "no library".to_string(),
+        },
         if replaced > 0 { format!(" Replaced {replaced} figure(s) from the last run.") } else { String::new() }
     ));
     for f in &lw.figures {
@@ -2333,6 +2393,89 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
     for w in &lw.warnings {
         host.push_info(&format!("LS_FINISH: {w}"));
     }
+}
+
+/// `LS_LIBRARY [LOAD <library.csv> | RESET | SHOW]` — the field-to-finish
+/// code library, in MicroSurvey's AutoMAP CSV format: which codes connect
+/// into linework and their layer, linetype, colour, 2D/3D and width. Kept for
+/// the session; `LS_FINISH` uses it. With no argument, or `SHOW`, lists it.
+fn library_cmd(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_LIBRARY [LOAD <library.csv> | RESET | SHOW]";
+    let rest = first_arg(cmd);
+    let (word, arg) = match rest.split_once(char::is_whitespace) {
+        Some((w, a)) => (w.to_ascii_uppercase(), a.trim()),
+        None => (rest.to_ascii_uppercase(), ""),
+    };
+    match word.as_str() {
+        "LOAD" if !arg.is_empty() => {
+            let text = match read_text(arg) {
+                Ok(t) => t,
+                Err(e) => {
+                    host.push_error(&format!("LS_LIBRARY: cannot read \"{arg}\": {e}"));
+                    return;
+                }
+            };
+            match landsurvey::library::Library::parse(&text) {
+                Ok(lib) => {
+                    let name = std::path::Path::new(arg)
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| arg.to_string());
+                    let connect = lib.codes.iter().filter(|c| c.connect).count();
+                    let symbols = lib.codes.iter().filter(|c| !c.symbol.is_empty()).count();
+                    host.push_output(&format!(
+                        "LS_LIBRARY: loaded {name}: {} code(s), {connect} connect into linework, {symbols} with a symbol.",
+                        lib.codes.len()
+                    ));
+                    crate::state::state().code_library = Some((name, lib));
+                }
+                Err(e) => host.push_error(&format!("LS_LIBRARY: \"{arg}\" is not a usable AutoMAP library: {e}")),
+            }
+        }
+        "RESET" => {
+            crate::state::state().code_library = None;
+            host.push_output("LS_LIBRARY: cleared; LS_FINISH connects string-numbered codes.");
+        }
+        "" | "SHOW" => {
+            let library = crate::state::state().code_library.clone();
+            let Some((name, lib)) = library else {
+                host.push_output(
+                    "LS_LIBRARY: no library loaded; LS_FINISH connects string-numbered codes \
+                     (ER1, BLDG2) on LS-LN-<CODE> layers. Load one with LS_LIBRARY LOAD <file.csv>.",
+                );
+                return;
+            };
+            host.push_output(&format!("LS_LIBRARY: {name}, {} code(s):", lib.codes.len()));
+            for c in &lib.codes {
+                let mut line = format!("  {:<12}", c.key);
+                if c.connect {
+                    line.push_str(&format!(
+                        " lines on {}{}{}{}",
+                        if c.line_layer.is_empty() { "LS-LN-<CODE>" } else { &c.line_layer },
+                        if c.line_type.is_empty() { String::new() } else { format!(", {}", c.line_type) },
+                        c.color.map(|i| format!(", colour {i}")).unwrap_or_default(),
+                        if c.three_d { ", 3D" } else { "" },
+                    ));
+                }
+                if !c.symbol.is_empty() {
+                    line.push_str(&format!(" symbol {}", c.symbol));
+                }
+                if !c.connect && c.symbol.is_empty() {
+                    line.push_str(" point only");
+                }
+                host.push_output(&line);
+            }
+        }
+        _ => host.push_info(USAGE),
+    }
+}
+
+/// `name` with the characters DWG forbids in layer names replaced by `_`
+/// (spaces are allowed, as in AutoMAP layers such as `CURB TOP`).
+fn layer_name_safe(name: &str) -> String {
+    name.chars()
+        .map(|c| if "<>/\\\":;?*|=`".contains(c) { '_' } else { c })
+        .collect()
 }
 
 /// `LS_IMPORTPLAN <path.json>` — import recognized plan geometry (the
@@ -2506,6 +2649,19 @@ mod tests {
         }
     }
 
+    impl TestHost {
+        /// Register an entity's layer if the drawing lacks it, as the host's
+        /// `Scene::add_entity` does (OCS #252), so it survives a DWG save.
+        fn ensure_layer(&mut self, e: &EntityType) {
+            let name = &e.common().layer;
+            if !name.trim().is_empty() && !self.doc.layers.contains(name) {
+                let mut layer = codec::tables::Layer::new(name);
+                layer.set_handle(self.doc.allocate_handle());
+                let _ = self.doc.layers.add(layer);
+            }
+        }
+    }
+
     impl HostApi for TestHost {
         fn tab_index(&self) -> usize {
             0
@@ -2518,6 +2674,7 @@ mod tests {
         }
         fn add_entity(&mut self, entity: EntityType) -> codec::Handle {
             self.single_adds += 1;
+            self.ensure_layer(&entity);
             self.doc.add_entity(entity).expect("add_entity")
         }
         fn add_entities(&mut self, entities: Vec<EntityType>) -> Vec<codec::Handle> {
@@ -2527,7 +2684,10 @@ mod tests {
             }
             entities
                 .into_iter()
-                .map(|e| self.doc.add_entity(e).expect("add_entity"))
+                .map(|e| {
+                    self.ensure_layer(&e);
+                    self.doc.add_entity(e).expect("add_entity")
+                })
                 .collect()
         }
         fn bump_geometry(&mut self) {}
@@ -2691,8 +2851,17 @@ mod tests {
 
     /// LS_FINISH connects imported points by their codes, replaces its own
     /// figures when re-run, and exports them as LandXML plan features.
+    /// LS_FINISH reads the process-global code library; tests that run it
+    /// take this lock so one test's library never leaks into another.
+    static FINISH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn finish_lock() -> std::sync::MutexGuard<'static, ()> {
+        FINISH_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn finish_draws_figures_and_reruns_cleanly() {
+        let _lock = finish_lock();
         let dir = std::env::temp_dir().join(format!("ls_finish_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("pts.csv");
@@ -2775,6 +2944,7 @@ mod tests {
 
     #[test]
     fn finish_xyz_mode_and_bad_args() {
+        let _lock = finish_lock();
         let dir = std::env::temp_dir().join(format!("ls_finish_xyz_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("pts.csv");
@@ -2798,6 +2968,129 @@ mod tests {
         finish(&mut host, "LS_FINISH sideways");
         assert!(host.log[0].starts_with("Usage: LS_FINISH"), "{:?}", host.log);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With an AutoMAP library loaded, LS_FINISH connects the library's
+    /// CONNECT codes and draws them with its layer, colour, linetype, width and
+    /// 2D/3D settings.
+    #[test]
+    fn finish_uses_the_code_library() {
+        let _lock = finish_lock();
+        let dir = std::env::temp_dir().join(format!("ls_finish_lib_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lib = dir.join("lib.csv");
+        std::fs::write(
+            &lib,
+            "\u{feff}KEY,SYMBOL,CONNECT,LINE LAYER,LINE TYPE,COLOR,2D,PLINE WIDTH\n\
+             TC,,1,CURB TOP,,5,0,0\n\
+             SHED,,1,BUILDING,HIDDEN,3,1,0.25\n\
+             CL,,1,,CENTER,256,1,0\n\
+             OIP,BLOCKS\\ICM_FSIP.DWG,0,,,255,1,0\n",
+        )
+        .unwrap();
+        let src = dir.join("pts.csv");
+        std::fs::write(
+            &src,
+            "1,100,200,10,TC\n2,100,210,11,TC\n3,105,210,10,OIP\n4,110,210,12,TC\n\
+             5,0,0,0,SHED\n6,0,5,0,SHED\n7,5,5,0,SHED CLS\n8,50,50,0,CL\n9,60,50,0,CL\n10,1,1,1,G\n",
+        )
+        .unwrap();
+        let mut host = TestHost::new();
+        // HIDDEN is loaded in this drawing, CENTER is not.
+        let mut hidden = codec::tables::LineType::new("HIDDEN");
+        hidden.set_handle(host.doc.allocate_handle());
+        host.doc.line_types.add(hidden).unwrap();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+
+        library_cmd(&mut host, &format!("LS_LIBRARY LOAD {}", lib.display()));
+        assert!(host.log.iter().any(|l| l.contains("loaded lib.csv: 4 code(s), 3 connect into linework, 1 with a symbol")), "{:?}", host.log);
+        finish(&mut host, "LS_FINISH lines");
+        library_cmd(&mut host, "LS_LIBRARY");
+        library_cmd(&mut host, "LS_LIBRARY RESET");
+
+        // TC: 3D, its elevations kept, on CURB TOP, colour 5.
+        let tc = host
+            .doc
+            .entities()
+            .find_map(|e| match e {
+                EntityType::Polyline3D(pl) => Some((pl.clone(), e.common().clone())),
+                _ => None,
+            })
+            .expect("a 3D TC figure");
+        let zs: Vec<f64> = tc.0.vertices.iter().map(|v| v.position.z).collect();
+        assert_eq!(zs, [10.0, 11.0, 12.0]);
+        assert_eq!((tc.1.layer.as_str(), tc.1.color), ("CURB TOP", Color::from_index(5)));
+        // SHED: 2D, closed, width 0.25, the loaded HIDDEN linetype.
+        let lw = |key: &str| {
+            host.doc
+                .entities()
+                .find_map(|e| match e {
+                    EntityType::LwPolyline(pl) if named_tag(e, XDATA_FIGURE).is_some_and(|t| t.0 == key) => {
+                        Some((pl.clone(), e.common().clone()))
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {key} figure"))
+        };
+        let (shed, common) = lw("SHED");
+        assert!(shed.is_closed);
+        assert_eq!(shed.constant_width, 0.25);
+        assert_eq!((common.layer.as_str(), common.linetype.as_str()), ("BUILDING", "HIDDEN"));
+        // CL: no layer in the library, by-layer colour, CENTER not loaded.
+        let (_, common) = lw("CL");
+        assert_eq!(common.layer, "LS-LN-CL");
+        assert_eq!(common.color, Color::ByLayer);
+        assert_ne!(common.linetype, "CENTER");
+        let log = host.log.join("\n");
+        assert!(log.contains("linetype(s) CENTER are not loaded"), "{log}");
+        assert!(log.contains("3 figure(s) from 10 point(s), string-numbered codes, shot order, library lib.csv"), "{log}");
+        assert!(log.contains("not in the library, so not connected: G (1)"), "{log}");
+        assert!(log.contains("SHED         lines on BUILDING, HIDDEN, colour 3"), "{log}");
+        assert!(log.contains("OIP          symbol BLOCKS\\ICM_FSIP.DWG"), "{log}");
+        assert!(log.contains("LS_LIBRARY: cleared"), "{log}");
+
+        // Styled figures survive a DWG save and reopen.
+        let bytes = DwgWriter::write_to_vec(&host.doc).expect("dwg write");
+        let rt = DwgReader::from_stream(Cursor::new(bytes)).read().expect("dwg read");
+        let tc_back = rt.get_entity(tc.1.handle).expect("TC after reopen");
+        assert!(matches!(tc_back, EntityType::Polyline3D(pl) if pl.vertices.len() == 3));
+        assert_eq!(tc_back.common().layer, "CURB TOP");
+        assert_eq!(named_tag(tc_back, XDATA_FIGURE).map(|t| t.0), Some("TC".to_string()));
+        let shed_back = rt.get_entity(common_handle_of(&host, "SHED")).expect("SHED after reopen");
+        assert!(shed_back.common().linetype.eq_ignore_ascii_case("HIDDEN"), "{:?}", shed_back.common().linetype);
+
+        // The 3D figure exports as a plan feature with the 2D ones.
+        let out = dir.join("out.xml");
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} features", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let mut names: Vec<_> = back.features.iter().map(|f| f.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["CL", "SHED", "TC"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Handle of the LS_FINISH figure whose string is `key`.
+    fn common_handle_of(host: &TestHost, key: &str) -> codec::Handle {
+        host.doc
+            .entities()
+            .find(|e| named_tag(e, XDATA_FIGURE).is_some_and(|t| t.0 == key))
+            .map(|e| e.common().handle)
+            .unwrap_or_else(|| panic!("no {key} figure"))
+    }
+
+    #[test]
+    fn library_command_rejects_bad_input() {
+        let _lock = finish_lock();
+        let mut host = TestHost::new();
+        library_cmd(&mut host, "LS_LIBRARY LOAD");
+        library_cmd(&mut host, "LS_LIBRARY FROB");
+        assert!(host.log.iter().all(|l| l.starts_with("Usage: LS_LIBRARY")), "{:?}", host.log);
+        let bad = std::env::temp_dir().join(format!("ls_badlib_{}.csv", std::process::id()));
+        std::fs::write(&bad, "NAME,X\nA,1\n").unwrap();
+        library_cmd(&mut host, &format!("LS_LIBRARY LOAD {}", bad.display()));
+        let _ = std::fs::remove_file(&bad);
+        assert!(host.log.last().unwrap().contains("not a usable AutoMAP library: no KEY column"), "{:?}", host.log);
+        assert!(crate::state::state().code_library.is_none());
     }
 
     /// Register the LANDSURVEY_* APPIDs with real handles, as the fixed host

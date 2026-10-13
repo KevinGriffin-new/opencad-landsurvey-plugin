@@ -1,8 +1,28 @@
 # Field-to-finish: linework and symbols — design
 
-Status: **phase 1 built** (`landsurvey::finish`, `LS_FINISH lines`): string-numbered
-and XYZ coding, ordering, closure, `Y` spurs, `*` joins, re-run safety. Later
-phases are still design.
+Status: **phases 1 and 2 built.** Phase 1 (`landsurvey::finish`, `LS_FINISH lines`):
+string-numbered and XYZ coding, ordering, closure, `Y` spurs, `*` joins, re-run
+safety. Phase 2 (`landsurvey::library`, `LS_LIBRARY`): AutoMAP CSV libraries with
+connect, line layer, colour, linetype, 2D/3D and width, AutoMAP lookup and
+wildcards. Later phases are still design.
+
+Notes from building phase 2:
+
+- AutoMAP treats `COLOR` and `LINE TYPE` as the properties of the line layer
+  it creates. A plugin cannot create or edit layers (the host registers a
+  layer, with default properties, when an entity first uses it), so they are
+  set on each figure instead. A linetype the drawing has not loaded is left
+  by layer and reported, because the DWG writer can only reference loaded
+  linetypes.
+- `COLOR` 0 (by block) and 256 (by layer) both mean "by layer"; 1–255 are
+  colour indexes. MicroSurvey's own libraries use all three.
+- `LINES` (individual lines vs polyline) is read but not used; figures are
+  always polylines.
+- MicroSurvey ships linework libraries to test against (`default.csv`,
+  `feature_demo.csv`, `leica-code-list.csv`, `nikon.csv`, `survey.csv` in
+  `ProgramData\MicroSurvey\MSCAD\2027\mscad`); all of them parse, and the
+  Lab 8 strings connect only where a library has the code (`BLDG1` via
+  `BLDG` in `default.csv`, `GL1` exactly in `nikon.csv`).
 
 ## Goal
 

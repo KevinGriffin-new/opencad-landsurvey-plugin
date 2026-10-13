@@ -62,6 +62,19 @@ impl CadModule for LandSurveyModule {
                         icon: IconKind::Glyph("\u{2933}"), // ⤳
                         event: ModuleEvent::Command("LS_FINISH".to_string()),
                     }),
+                    // Native picker -> "LS_LIBRARY LOAD <path>": the code
+                    // library LS_FINISH connects and styles linework from.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_LIBRARY",
+                        label: "Code Library",
+                        icon: IconKind::Glyph("\u{2637}"), // ☷
+                        event: ModuleEvent::PluginFileDialog {
+                            command: "LS_LIBRARY LOAD".to_string(),
+                            title: "Load a feature code library".to_string(),
+                            filter_name: "AutoMAP library (CSV)".to_string(),
+                            extensions: vec!["csv".to_string()],
+                        },
+                    }),
                 ],
             },
             RibbonGroup {

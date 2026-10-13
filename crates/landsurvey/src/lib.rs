@@ -11,6 +11,7 @@ pub mod dxf;
 pub mod finish;
 pub mod label_style;
 pub mod landxml;
+pub mod library;
 pub mod plan;
 pub mod pnezd;
 pub mod resection;

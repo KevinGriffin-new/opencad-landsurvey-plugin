@@ -19,7 +19,9 @@
 //! they are drawn straight until curve fitting is built.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+use crate::library::Library;
 
 /// A survey point with its field description.
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +74,8 @@ pub struct Figure {
     pub string: String,
     pub vertices: Vec<Vertex>,
     pub closed: bool,
+    /// The library row that styles this figure, when a library is in use.
+    pub row: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -91,10 +95,27 @@ impl Linework {
     }
 }
 
-/// Build the figures for `points` (given in shot order).
+/// Build the figures for `points` (given in shot order), with no library:
+/// any string-numbered code connects.
 pub fn build(points: &[CodedPoint], opts: &Options) -> Linework {
+    build_with(points, opts, None)
+}
+
+/// Build the figures for `points` (given in shot order). With a `library`,
+/// string coding connects only the codes whose row has `CONNECT` set, with or
+/// without a string number, and reports codes the library lacks; XYZ coding
+/// treats a whole word that is itself a library code as a plain code, never
+/// as a prefix (`ZL` stays `ZL`). Each figure records its styling row.
+pub fn build_with(points: &[CodedPoint], opts: &Options, library: Option<&Library>) -> Linework {
     let order = ordered(points, opts.order);
-    let mut b = Builder { points, open: HashMap::new(), figures: Vec::new(), warnings: Vec::new() };
+    let mut b = Builder {
+        points,
+        library,
+        open: HashMap::new(),
+        figures: Vec::new(),
+        warnings: Vec::new(),
+        unknown: BTreeMap::new(),
+    };
     match opts.mode {
         Mode::Strings => b.strings(&order),
         Mode::Xyz => b.xyz(&order),
@@ -160,19 +181,28 @@ fn split_string_number(code: &str) -> (&str, bool) {
 
 struct Builder<'a> {
     points: &'a [CodedPoint],
+    library: Option<&'a Library>,
     /// Open figure per string key.
     open: HashMap<String, usize>,
     figures: Vec<Figure>,
     warnings: Vec<String>,
+    /// Codes missing from the library, with how many points use them.
+    unknown: BTreeMap<String, usize>,
 }
 
 impl Builder<'_> {
+    fn row(&self, code: &str, string: &str) -> Option<usize> {
+        self.library.and_then(|l| l.lookup_word(string).or_else(|| l.lookup_word(code)))
+    }
+
     fn start(&mut self, code: &str, string: &str, v: Vertex) -> usize {
+        let row = self.row(code, string);
         self.figures.push(Figure {
             code: code.to_string(),
             string: string.to_string(),
             vertices: vec![v],
             closed: false,
+            row,
         });
         let f = self.figures.len() - 1;
         self.open.insert(string.to_string(), f);
@@ -194,12 +224,31 @@ impl Builder<'_> {
                 .map(|w| w.to_ascii_uppercase())
                 .collect();
             let has = |w: &str| controls.iter().any(|c| c == w);
-            for part in join_parts(code_word(desc)) {
+            let parts = join_parts(code_word(desc));
+            let single = parts.len() == 1;
+            for part in parts {
                 let key = part.to_ascii_uppercase();
                 let (base, numbered) = split_string_number(&key);
-                if !numbered {
+                let connects = match self.library {
+                    Some(lib) => {
+                        // A lone code may match the whole description
+                        // (AutoMAP rows such as `TREE 40FIR`).
+                        let row = if single { lib.lookup(desc) } else { lib.lookup_word(&key) };
+                        match row {
+                            Some(r) => lib.codes[r].connect,
+                            None => {
+                                let code = if numbered { base } else { key.as_str() };
+                                *self.unknown.entry(code.to_string()).or_insert(0) += 1;
+                                false
+                            }
+                        }
+                    }
+                    None => numbered,
+                };
+                if !connects {
                     continue;
                 }
+                let base = if numbered { base } else { key.as_str() };
                 if has("B") {
                     self.open.remove(&key);
                 }
@@ -238,8 +287,9 @@ impl Builder<'_> {
                 let mut chars = upper.chars();
                 let prefix = chars.next().unwrap_or(' ');
                 let rest = chars.as_str();
+                let is_code = self.library.is_some_and(|l| l.has_exact(&upper));
                 let (kind, base) = match prefix {
-                    'Z' | 'X' | 'Y' | '.' if !rest.is_empty() => (prefix, rest.to_string()),
+                    'Z' | 'X' | 'Y' | '.' if !rest.is_empty() && !is_code => (prefix, rest.to_string()),
                     _ => (' ', upper.clone()),
                 };
                 match kind {
@@ -255,11 +305,13 @@ impl Builder<'_> {
                     'Y' => match self.open.get(&base) {
                         Some(&f) => {
                             let from = *self.figures[f].vertices.last().expect("open figure has a vertex");
+                            let row = self.row(&base, &base);
                             self.figures.push(Figure {
                                 code: base.clone(),
                                 string: base.clone(),
                                 vertices: vec![Vertex { point: from.point, curve: false }, Vertex { point: i, curve: false }],
                                 closed: false,
+                                row,
                             });
                         }
                         None => self.warnings.push(format!(
@@ -306,6 +358,17 @@ impl Builder<'_> {
                 continue;
             }
             figures.push(f);
+        }
+        if !self.unknown.is_empty() {
+            let mut codes: Vec<(&String, &usize)> = self.unknown.iter().collect();
+            codes.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            let shown: Vec<String> = codes.iter().take(12).map(|(c, n)| format!("{c} ({n})")).collect();
+            let more = codes.len().saturating_sub(12);
+            self.warnings.push(format!(
+                "not in the library, so not connected: {}{}",
+                shown.join(", "),
+                if more > 0 { format!(" and {more} more") } else { String::new() }
+            ));
         }
         Linework { figures, warnings: self.warnings }
     }
@@ -464,6 +527,47 @@ mod tests {
         let p = pts(&[("1", "EP1"), ("2", "EP1*CU1"), ("3", "CU1"), ("4", "EP1"), ("5", "EP"), ("6", "EP")]);
         let lw = build(&p, &Options::default());
         assert_eq!(chains(&p, &lw), ["1-2-4", "2-3"]);
+    }
+
+    fn lib(rows: &str) -> Library {
+        Library::parse(&format!("KEY,CONNECT,LINE LAYER
+{rows}")).unwrap()
+    }
+
+    /// With a library, AutoMAP CONNECT joins every point with the code, string
+    /// number or not; string numbers still split figures; codes the library
+    /// lacks, or that do not connect, stay points and are reported.
+    #[test]
+    fn strings_with_library() {
+        let l = lib("TC,1,CURB TOP
+OIP,0,
+FE*,1,FENCE
+");
+        let p = pts(&[
+            ("1", "TC"), ("2", "OIP"), ("3", "TC east"), ("4", "G"), ("5", "TC1"), ("6", "TC"),
+            ("7", "TC1"), ("8", "FENCE2"), ("9", "G"), ("10", "FENCE2"), ("11", "ER1"),
+        ]);
+        let lw = build_with(&p, &Options::default(), Some(&l));
+        assert_eq!(chains(&p, &lw), ["1-3-6", "5-7", "8-10"]);
+        let rows: Vec<Option<&str>> = lw.figures.iter().map(|f| f.row.map(|r| l.codes[r].key.as_str())).collect();
+        assert_eq!(rows, [Some("TC"), Some("TC"), Some("FE*")]);
+        assert_eq!(lw.warnings, ["not in the library, so not connected: G (2), ER (1)"]);
+    }
+
+    /// MoTI codes such as `ZL` (miscellaneous line) begin with an XYZ prefix
+    /// letter; when the library knows the whole word it is a plain code.
+    #[test]
+    fn xyz_library_code_is_not_a_prefix() {
+        let l = lib("ZL,0,
+CURB,1,CURB
+");
+        let p = pts(&[("1", "ZCURB"), ("2", "ZL"), ("3", "ZCURB"), ("4", "ZL"), ("5", "CURB")]);
+        let lw = build_with(&p, &Options { mode: Mode::Xyz, order: Order::Number }, Some(&l));
+        assert_eq!(chains(&p, &lw), ["1-3-5"]);
+        assert_eq!(lw.figures[0].row, Some(1));
+        // Without the library, ZL reads as "line, code L".
+        let bare = build(&p, &Options { mode: Mode::Xyz, order: Order::Number });
+        assert_eq!(chains(&p, &bare), ["1-3-5", "2-4"]);
     }
 
     #[test]

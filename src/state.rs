@@ -53,6 +53,9 @@ pub struct LandSurveyState {
     /// Units of the last LandXML import, reused by `LS_LANDXMLOUT` so an
     /// imperial file round-trips as imperial.
     pub landxml_units: Option<landsurvey::landxml::Units>,
+    /// The field-to-finish code library (`LS_LIBRARY LOAD`) and the file it
+    /// came from.
+    pub code_library: Option<(String, landsurvey::library::Library)>,
 }
 
 impl LandSurveyState {
