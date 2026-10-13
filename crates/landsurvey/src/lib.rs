@@ -8,6 +8,7 @@
 pub mod alignment;
 pub mod cogo;
 pub mod dxf;
+pub mod finish;
 pub mod label_style;
 pub mod landxml;
 pub mod plan;

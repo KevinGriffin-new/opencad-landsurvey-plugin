@@ -40,6 +40,7 @@ static MANIFEST: PluginManifest = PluginManifest {
         dispatch::XDATA_SURFACE,
         dispatch::XDATA_PARCEL,
         dispatch::XDATA_FEATURE,
+        dispatch::XDATA_FIGURE,
         landxml_draw::XDATA_ALIGN,
         landxml_draw::XDATA_PROFILE,
         landxml_draw::XDATA_XSECT,

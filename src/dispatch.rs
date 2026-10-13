@@ -42,6 +42,12 @@ pub const XDATA_PARCEL: &str = "LANDSURVEY_PARCEL";
 /// Record values: `[String(name), String(description)]`.
 pub const XDATA_FEATURE: &str = "LANDSURVEY_FEATURE";
 
+/// XDATA application tagging a field-to-finish figure drawn by `LS_FINISH`.
+/// Record values: `[String(string), String(code), String(first_point),
+/// String(last_point), String(point_count)]`. `LS_FINISH` replaces every
+/// entity carrying it when re-run.
+pub const XDATA_FIGURE: &str = "LANDSURVEY_FIGURE";
+
 /// Default world-unit height for imported plan labels (the source JSON carries
 /// no text height).
 const PLAN_TEXT_HEIGHT: f64 = 2.0;
@@ -66,6 +72,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         "LS_HELLO" => {
             host.push_info(
                 "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL. \
+                 Field-to-finish: LS_FINISH. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
@@ -135,6 +142,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_LIST" => {
             list_points(host);
+            true
+        }
+        "LS_FINISH" => {
+            finish(host, cmd);
             true
         }
         _ => false,
@@ -333,8 +344,12 @@ fn code_layer(code: &str) -> String {
     if code.is_empty() {
         return "LS-POINTS".to_string();
     }
-    let safe: String = code
-        .chars()
+    format!("LS-PT-{}", layer_safe(code))
+}
+
+/// `code` upper-cased with DWG-illegal layer-name characters replaced by `_`.
+fn layer_safe(code: &str) -> String {
+    code.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
                 c.to_ascii_uppercase()
@@ -342,8 +357,7 @@ fn code_layer(code: &str) -> String {
                 '_'
             }
         })
-        .collect();
-    format!("LS-PT-{safe}")
+        .collect()
 }
 
 /// Read a text input file in whatever encoding it was exported in (UTF-8,
@@ -1165,7 +1179,9 @@ fn export_landxml(host: &mut dyn HostApi, cmd: &str) {
                     .iter()
                     .map(|v| (v.location.x, v.location.y, v.bulge))
                     .collect();
-                if let Some((name, desc)) = named_tag(e, XDATA_FEATURE) {
+                // Field-to-finish figures export as plan features too, named
+                // by their string.
+                if let Some((name, desc)) = named_tag(e, XDATA_FEATURE).or_else(|| named_tag(e, XDATA_FIGURE)) {
                     if want("features") {
                         doc.features.push(landxml::PlanFeature {
                             name,
@@ -2185,6 +2201,140 @@ fn list_points(host: &mut dyn HostApi) {
     }
 }
 
+/// `LS_FINISH [lines] [symbols] [mode=strings|xyz] [order=shot|number]
+/// [preview]` — field-to-finish: connect the Land Survey points in the drawing
+/// into figures from their coded descriptions (see `landsurvey::finish` and
+/// `docs/field-to-finish-design.md`). Points are taken in the order they were
+/// imported. Each figure is an LWPolyline on `LS-LN-<CODE>` tagged
+/// `LANDSURVEY_FIGURE`; a re-run first removes the figures it drew before, so
+/// edited codes never leave doubled lines. `preview` reports without drawing.
+fn finish(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str =
+        "Usage: LS_FINISH [lines] [symbols] [mode=strings|xyz] [order=shot|number] [preview]";
+    let mut opts = landsurvey::finish::Options::default();
+    let (mut lines, mut symbols, mut preview) = (false, false, false);
+    for arg in cmd.split_whitespace().skip(1) {
+        match arg.to_ascii_lowercase().as_str() {
+            "lines" => lines = true,
+            "symbols" => symbols = true,
+            "preview" => preview = true,
+            "mode=strings" => opts.mode = landsurvey::finish::Mode::Strings,
+            "mode=xyz" => opts.mode = landsurvey::finish::Mode::Xyz,
+            "order=shot" => opts.order = landsurvey::finish::Order::Shot,
+            "order=number" => opts.order = landsurvey::finish::Order::Number,
+            _ => {
+                host.push_info(USAGE);
+                return;
+            }
+        }
+    }
+    if !lines && !symbols {
+        lines = true;
+        symbols = true;
+    }
+    if symbols {
+        host.push_info("LS_FINISH: symbols are not built yet; drawing lines only.");
+    }
+    if !lines {
+        return;
+    }
+
+    // Survey points in import order (handles are allocated increasing), and
+    // the figures a previous run drew.
+    let mut tagged: Vec<(codec::Handle, landsurvey::finish::CodedPoint)> = Vec::new();
+    let mut old: Vec<codec::Handle> = Vec::new();
+    for e in host.document().entities() {
+        let handle = e.common().handle;
+        if e.common().extended_data.get_record(XDATA_FIGURE).is_some() {
+            old.push(handle);
+            continue;
+        }
+        let (EntityType::Point(p), Some((name, description))) = (e, named_tag(e, XDATA_POINT)) else {
+            continue;
+        };
+        tagged.push((
+            handle,
+            landsurvey::finish::CodedPoint {
+                name,
+                northing: p.location.y,
+                easting: p.location.x,
+                elevation: p.location.z,
+                description,
+            },
+        ));
+    }
+    if tagged.is_empty() {
+        host.push_error("LS_FINISH: no Land Survey points in the drawing. Import some first (LS_PNEZD, LS_RAW, LS_LANDXML).");
+        return;
+    }
+    tagged.sort_by_key(|(h, _)| *h);
+    let points: Vec<_> = tagged.into_iter().map(|(_, p)| p).collect();
+
+    let lw = landsurvey::finish::build(&points, &opts);
+    let mode = match opts.mode {
+        landsurvey::finish::Mode::Strings => "string-numbered codes",
+        landsurvey::finish::Mode::Xyz => "XYZ prefix codes",
+    };
+    let order = match opts.order {
+        landsurvey::finish::Order::Shot => "shot order",
+        landsurvey::finish::Order::Number => "point-number order",
+    };
+
+    let replaced = if preview {
+        0
+    } else {
+        host.push_undo("LS_FINISH");
+        let n = old.iter().filter(|&&h| host.remove_entity(h)).count();
+        let mut batch = Batch::new();
+        for f in &lw.figures {
+            let verts: Vec<(f64, f64, f64)> = f
+                .vertices
+                .iter()
+                .map(|v| (points[v.point].easting, points[v.point].northing, 0.0))
+                .collect();
+            let first = &points[f.vertices[0].point].name;
+            let last = &points[f.vertices[f.vertices.len() - 1].point].name;
+            let mut rec = ExtendedDataRecord::new(XDATA_FIGURE);
+            for v in [&f.string, &f.code, first, last, &f.vertices.len().to_string()] {
+                rec.add_value(XDataValue::String(v.clone()));
+            }
+            let layer = format!("LS-LN-{}", layer_safe(&f.code));
+            batch.add_tagged(EntityType::LwPolyline(lwpolyline(&verts, f.closed)), &layer, rec);
+        }
+        batch.commit(host);
+        host.bump_geometry();
+        host.set_dirty();
+        n
+    };
+
+    host.push_output(&format!(
+        "LS_FINISH{}: {} figure(s) from {} point(s), {mode}, {order}.{}",
+        if preview { " preview" } else { "" },
+        lw.figures.len(),
+        points.len(),
+        if replaced > 0 { format!(" Replaced {replaced} figure(s) from the last run.") } else { String::new() }
+    ));
+    for f in &lw.figures {
+        let first = &points[f.vertices[0].point].name;
+        let last = &points[f.vertices[f.vertices.len() - 1].point].name;
+        host.push_output(&format!(
+            "  {:<10} {} point(s), {first} to {last}{}",
+            f.string,
+            f.vertices.len(),
+            if f.closed { ", closed" } else { "" }
+        ));
+    }
+    let curves = lw.curve_vertices();
+    if curves > 0 {
+        host.push_info(&format!(
+            "LS_FINISH: {curves} curve point(s) are drawn as straight segments for now."
+        ));
+    }
+    for w in &lw.warnings {
+        host.push_info(&format!("LS_FINISH: {w}"));
+    }
+}
+
 /// `LS_IMPORTPLAN <path.json>` — import recognized plan geometry (the
 /// `plan2cad` / `plat2json` pipelines' JSON) faithfully: each element becomes
 /// an entity on its named layer, tagged with `LANDSURVEY_PLAN` XDATA (source
@@ -2539,12 +2689,123 @@ mod tests {
         assert!(host.log.iter().any(|l| l.contains(&format!("imported {} labeled point(s)", accepted / 2))), "{:?}", host.log);
     }
 
+    /// LS_FINISH connects imported points by their codes, replaces its own
+    /// figures when re-run, and exports them as LandXML plan features.
+    #[test]
+    fn finish_draws_figures_and_reruns_cleanly() {
+        let dir = std::env::temp_dir().join(format!("ls_finish_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("pts.csv");
+        std::fs::write(
+            &src,
+            "1,100,200,10,TH CN\n2,100,210,10,ER1\n3,105,210,10,G\n4,110,210,10,ER1\n\
+             5,110,220,10,BLDG1 STUCCO\n6,115,220,10,BLDG1\n7,115,225,10,BLDG1\n\
+             8,110,225,10,BLDG1 CLS\n9,120,210,10,ER1\n10,99,99,10,FE1\n",
+        )
+        .unwrap();
+        let mut host = TestHost::new();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+
+        let figures = |host: &TestHost| -> Vec<(String, String, usize, bool)> {
+            host.doc
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::LwPolyline(pl) => named_tag(e, XDATA_FIGURE)
+                        .map(|(s, _)| (s, e.common().layer.clone(), pl.vertices.len(), pl.is_closed)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        finish(&mut host, "LS_FINISH preview");
+        assert!(figures(&host).is_empty(), "preview drew");
+        assert!(host.log.iter().any(|l| l.starts_with("LS_FINISH preview: 2 figure(s) from 10 point(s)")), "{:?}", host.log);
+
+        finish(&mut host, "LS_FINISH lines");
+        let mut got = figures(&host);
+        got.sort();
+        assert_eq!(
+            got,
+            [
+                ("BLDG1".to_string(), "LS-LN-BLDG".to_string(), 4, true),
+                ("ER1".to_string(), "LS-LN-ER".to_string(), 3, false),
+            ]
+        );
+        assert!(host.log.iter().any(|l| l == "LS_FINISH: FE1: only one point (10), no line drawn"), "{:?}", host.log);
+        // ER1 runs 2 → 4 → 9 in shot order, in plan coordinates.
+        let er1 = host
+            .doc
+            .entities()
+            .find_map(|e| match e {
+                EntityType::LwPolyline(pl) if named_tag(e, XDATA_FIGURE).is_some_and(|t| t.0 == "ER1") => Some(pl.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let xy: Vec<(f64, f64)> = er1.vertices.iter().map(|v| (v.location.x, v.location.y)).collect();
+        assert_eq!(xy, [(210.0, 100.0), (210.0, 110.0), (210.0, 120.0)]);
+
+        // Recode point 10 onto ER1 and re-run: one ER1, now four points, and
+        // no doubled figures.
+        for e in host.doc.entities_mut() {
+            if named_tag(e, XDATA_POINT).is_some_and(|t| t.0 == "10") {
+                let mut rec = ExtendedDataRecord::new(XDATA_POINT);
+                rec.add_value(XDataValue::String("10".into()));
+                rec.add_value(XDataValue::String("ER1".into()));
+                let xd = &mut e.common_mut().extended_data;
+                xd.clear();
+                xd.add_record(rec);
+            }
+        }
+        finish(&mut host, "LS_FINISH");
+        let mut got = figures(&host);
+        got.sort();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[1].2, 4);
+        assert!(host.log.iter().any(|l| l.contains("Replaced 2 figure(s)")), "{:?}", host.log);
+        assert!(host.log.iter().any(|l| l.contains("symbols are not built yet")), "{:?}", host.log);
+
+        let out = dir.join("out.xml");
+        export_landxml(&mut host, &format!("LS_LANDXMLOUT {} features", out.display()));
+        let back = landxml::read_document(&std::fs::read_to_string(&out).expect("exported"));
+        let mut names: Vec<_> = back.features.iter().map(|f| f.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, ["BLDG1", "ER1"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn finish_xyz_mode_and_bad_args() {
+        let dir = std::env::temp_dir().join(format!("ls_finish_xyz_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("pts.csv");
+        // Shot out of number order; XYZ coding joins by point number.
+        std::fs::write(&src, "3,0,10,0,ZCURB\n1,0,0,0,ZCURB\n2,0,5,0,ZCURB\n4,0,15,0,CURB\n").unwrap();
+        let mut host = TestHost::new();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+        finish(&mut host, "LS_FINISH lines mode=xyz order=number");
+        let pl = host
+            .doc
+            .entities()
+            .find_map(|e| match e {
+                EntityType::LwPolyline(pl) => Some(pl.clone()),
+                _ => None,
+            })
+            .expect("a figure");
+        let xs: Vec<f64> = pl.vertices.iter().map(|v| v.location.x).collect();
+        assert_eq!(xs, [0.0, 5.0, 10.0, 15.0]);
+
+        host.log.clear();
+        finish(&mut host, "LS_FINISH sideways");
+        assert!(host.log[0].starts_with("Usage: LS_FINISH"), "{:?}", host.log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Register the LANDSURVEY_* APPIDs with real handles, as the fixed host
     /// `ensure_app_id` does on `write_record` (OCS #249). A standalone test
     /// document has no host, so the writer needs this done by hand for the
     /// EED app references to resolve.
     fn register_ls_app_ids(doc: &mut CadDocument) {
-        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE] {
+        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE, XDATA_FIGURE] {
             if !doc.app_ids.contains(name) {
                 let mut app = AppId::new(name);
                 app.set_handle(doc.allocate_handle());

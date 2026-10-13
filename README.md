@@ -14,6 +14,8 @@ exports the two C symbols the host loader expects (via
 - **Field data** — data collector raw files (TDS / Carlson **RW5**, FieldGenius `.raw`,
   SurvCE; **Sokkia SDR**) reduced to coordinates with per-setup backsight and
   check-shot QC.
+- **Field-to-finish** — connect coded points into linework (`LS_FINISH`):
+  string-numbered codes (`ER1`, `BLDG2`) or MicroSurvey XYZ prefix coding.
 - **Surface** — build a TIN from PNEZD or **LandXML**; surface-to-surface and
   surface-to-datum **earthwork volumes** (exact TIN overlay + grid method) with
   drawn TINs, cut/fill lines, and result labels.
