@@ -24,6 +24,7 @@ USAGE:
   landsurvey-cli resect  <shots.csv> [-o out.dxf]
   landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
   landsurvey-cli raw     <field.raw|rw5|sdr> [--csv out.csv]   (alias: rw5)
+  landsurvey-cli symbols [-o sheet.svg]
   landsurvey-cli finish  <points.csv> [--library automap.csv] [--mode strings|xyz] [--order shot|number] [-o out.dxf]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
@@ -60,6 +61,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "inverse" => cmd_inverse(&args[1..]),
         "raw" | "rw5" => cmd_raw(&args[1..]),
         "finish" => cmd_finish(&args[1..]),
+        "symbols" => cmd_symbols(&args[1..]),
         "" | "-h" | "--help" | "help" => Ok(USAGE.to_string()),
         other => Err(format!("unknown subcommand \"{other}\"\n\n{USAGE}")),
     }
@@ -737,6 +739,48 @@ fn cmd_finish(args: &[String]) -> Result<String, String> {
     write_file(&dxf, &d.build())?;
     out.push_str(&format!("-> {dxf}"));
     Ok(out)
+}
+
+/// `symbols [-o sheet.svg]` — draw every built-in plan symbol (B.C. Reg.
+/// 229/2001 s. 29) on an SVG sheet at 10× plotted size, found beside placed,
+/// with names: a check of the shapes and a legend to copy from.
+fn cmd_symbols(args: &[String]) -> Result<String, String> {
+    use landsurvey::symbols::{builtins, Prim};
+    let (_, opts) = split_args(args, &["-o", "--out"]);
+    let all = builtins();
+    let k = 10.0; // px per plotted mm
+    let (cols, cell_w, cell_h) = (4usize, 190.0, 70.0);
+    let rows = all.len().div_ceil(cols);
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" font-family=\"sans-serif\" font-size=\"11\">\n<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n",
+        cols as f64 * cell_w,
+        rows as f64 * cell_h
+    );
+    for (n, s) in all.iter().enumerate() {
+        let cx = (n % cols) as f64 * cell_w + 30.0;
+        let cy = (n / cols) as f64 * cell_h + 30.0;
+        let pt = |q: [f64; 2]| format!("{:.2},{:.2}", cx + q[0] * k, cy - q[1] * k);
+        for prim in &s.prims {
+            svg.push_str(&match prim {
+                Prim::Circle { c, r } => format!("<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"none\" stroke=\"black\"/>\n", cx + c[0] * k, cy - c[1] * k, r * k),
+                Prim::Disc { c, r } => format!("<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"black\"/>\n", cx + c[0] * k, cy - c[1] * k, r * k),
+                Prim::Poly { pts, closed } => format!(
+                    "<{} points=\"{}\" fill=\"none\" stroke=\"black\"/>\n",
+                    if *closed { "polygon" } else { "polyline" },
+                    pts.iter().map(|q| pt(*q)).collect::<Vec<_>>().join(" ")
+                ),
+                Prim::Fill { pts } => format!("<polygon points=\"{}\" fill=\"black\"/>\n", pts.iter().map(|q| pt(*q)).collect::<Vec<_>>().join(" ")),
+            });
+        }
+        svg.push_str(&format!(
+            "<text x=\"{:.0}\" y=\"{:.0}\">{} ({})</text>\n<text x=\"{:.0}\" y=\"{:.0}\" fill=\"#555\">{}</text>\n",
+            cx + 30.0, cy - 2.0, s.name, if s.found { "found" } else { "placed" }, cx + 30.0, cy + 12.0, s.title
+        ));
+    }
+    svg.push_str("</svg>\n");
+    let out = opt(&opts).unwrap_or_else(|| "symbols.svg".to_string());
+    write_file(&out, &svg)?;
+    Ok(format!("{} symbol(s) -> {out}", all.len()))
 }
 
 /// Split argv into positionals and the values of known `value_flags` (each of

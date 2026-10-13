@@ -18,6 +18,7 @@ pub mod resection;
 pub mod rw5;
 pub mod sdr;
 pub mod surface;
+pub mod symbols;
 pub mod text;
 pub mod transform;
 pub mod viz;
