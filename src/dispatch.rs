@@ -62,8 +62,10 @@ pub fn handle(host: &mut dyn HostApi, cmd: &str) -> bool {
     // XDATA records round-trip natively since acadrust e88a9a6 / OCS #249
     // (records encode to EED on save and decode back on read), so commands
     // read and write tags through the host API with no extra codec pass.
-    // Layer-table registration for novel LS-* layers is still host-side work
-    // (OCS #252) — nothing the plugin can do out-of-process.
+    // The host registers a novel layer (default properties) when an entity
+    // first uses it (OCS #252). Creating layers with properties is possible
+    // through `HostApi::add_layer` / `table_operation` (API v7) but not used
+    // yet; see "Host scripting" in docs/field-to-finish-design.md.
     dispatch_verb(host, &verb, cmd)
 }
 
