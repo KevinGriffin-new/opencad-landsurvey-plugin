@@ -23,11 +23,14 @@ USAGE:
   landsurvey-cli helmert <pairs.csv> [--apply <points.csv>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
   landsurvey-cli resect  <shots.csv> [-o out.dxf]
   landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
+  landsurvey-cli rw5     <field.raw|rw5> [--csv out.csv]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
 LandXML (auto-detected). rts = Rotate/Translate/Scale about a base point (CCW+);
 --to translates the base to a new location. DXF layers: LS-TIN-*, LS-CUTFILL/
-LS-DATUM, LS-RTS-SRC/DST, LS-*-LABEL.";
+LS-DATUM, LS-RTS-SRC/DST, LS-*-LABEL. rw5 reduces a FieldGenius / TDS / SurvCE
+raw file to coordinates, reports setup and backsight checks, and with --csv
+writes the points as PNEZD.";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -52,6 +55,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "helmert" => cmd_helmert(&args[1..]),
         "resect" => cmd_resect(&args[1..]),
         "inverse" => cmd_inverse(&args[1..]),
+        "rw5" => cmd_rw5(&args[1..]),
         "" | "-h" | "--help" | "help" => Ok(USAGE.to_string()),
         other => Err(format!("unknown subcommand \"{other}\"\n\n{USAGE}")),
     }
@@ -571,6 +575,55 @@ fn add_tin(d: &mut DxfBuilder, s: &Surface, layer: &str) {
 
 /// Read a text input file in whatever encoding it was exported in (UTF-8,
 /// UTF-16 with a BOM, or Windows-1252).
+fn cmd_rw5(args: &[String]) -> Result<String, String> {
+    let (pos, opts) = split_args(args, &["--csv"]);
+    let path = pos.first().ok_or("usage: rw5 <field.raw|rw5> [--csv out.csv]")?;
+    let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
+    let r = landsurvey::rw5::reduce(&text);
+    if r.points.is_empty() {
+        return Err(format!("no points reduced from \"{path}\": {}", r.warnings.join("; ")));
+    }
+    let mut out = format!(
+        "job {} - {} point(s), {} setup(s)\n",
+        if r.job.is_empty() { "?" } else { &r.job },
+        r.points.len(),
+        r.setups.len()
+    );
+    for s in &r.setups {
+        out.push_str(&format!("  setup {} BS {}", s.station, s.backsight.as_deref().unwrap_or("-")));
+        if let Some(d) = s.stored_delta {
+            let f = landsurvey::rw5::fmt_delta;
+            out.push_str(&format!("  stored-ours dN {} dE {} dZ {}", f(d[0]), f(d[1]), f(d[2])));
+        }
+        if let (Some(h), Some(z)) = (s.bs_distance_error, s.bs_elevation_error) {
+            let f = landsurvey::rw5::fmt_delta;
+            out.push_str(&format!("  BS check dHD {} dZ {}", f(h), f(z)));
+        }
+        out.push('\n');
+    }
+    for rep in &r.repeats {
+        out.push_str(&format!(
+            "  repeat {}: dH {:.4} dZ {}\n",
+            rep.name,
+            rep.dh,
+            landsurvey::rw5::fmt_delta(rep.dz)
+        ));
+    }
+    for w in &r.warnings {
+        out.push_str(&format!("  warning: {w}\n"));
+    }
+    if let Some(csv) = opts.get("csv") {
+        let rows: String = r
+            .points
+            .iter()
+            .map(|p| format!("{},{:.6},{:.6},{:.6},{}\n", p.name, p.northing, p.easting, p.elevation, p.description))
+            .collect();
+        fs::write(csv, rows).map_err(|e| format!("cannot write \"{csv}\": {e}"))?;
+        out.push_str(&format!("wrote {csv} (PNEZD)\n"));
+    }
+    Ok(out.trim_end().to_string())
+}
+
 fn read_text(path: &str) -> std::io::Result<String> {
     fs::read(path).map(|bytes| landsurvey::text::decode(&bytes))
 }

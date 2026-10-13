@@ -13,6 +13,7 @@ pub mod landxml;
 pub mod plan;
 pub mod pnezd;
 pub mod resection;
+pub mod rw5;
 pub mod surface;
 pub mod text;
 pub mod transform;
