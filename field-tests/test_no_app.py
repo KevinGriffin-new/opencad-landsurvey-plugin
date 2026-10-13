@@ -390,8 +390,13 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
             for item in entities(symbols).get("entities", [])
             if str(item.get("layer", "")) == "LS-SYM"
         ]
-        kinds = sorted({str(item.get("type", "")) for item in placed})
-        checks.check("LS_FINISH places the OIP symbol as one block insert", kinds == ["Insert"] and len(placed) == 1, str(placed))
+        # The host reports an INSERT as a "Block Reference" naming its block.
+        inserted = [item for item in placed if item.get("block") == "LS-SYM-FSIP"]
+        checks.check(
+            "LS_FINISH places the OIP symbol as one block insert",
+            len(placed) == 1 and len(inserted) == 1 and inserted[0].get("type") in ("Block Reference", "Insert"),
+            str(placed),
+        )
 
     checks.finish()
     (output / "summary.json").write_text(json.dumps({"checks": checks.passed, "status": "passed"}, indent=2) + "\n", encoding="utf-8")
