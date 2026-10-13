@@ -71,7 +71,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
     match verb {
         "LS_HELLO" => {
             host.push_info(
-                "Land Survey plugin ready. Points: LS_PNEZD, LS_RW5, LS_LIST, LS_AUTOLABEL. \
+                "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL. \
                  Field-to-finish: LS_FINISH. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
@@ -85,8 +85,8 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
             import_pnezd(host, cmd);
             true
         }
-        "LS_RW5" => {
-            import_rw5(host, cmd);
+        "LS_RAW" | "LS_RW5" => {
+            import_raw(host, cmd);
             true
         }
         "LS_AUTOLABEL" => {
@@ -925,14 +925,16 @@ fn import_landxml(host: &mut dyn HostApi, cmd: &str) {
 
 /// LandXML COGO points become ordinary Land Survey points. The description
 /// leads with the feature code so `LS-PT-<CODE>` layering still works.
-/// `LS_RW5 <field.raw|rw5> [detail] [preview]` — reduce a FieldGenius / TDS /
-/// SurvCE raw data file to coordinates and import the points like `LS_PNEZD`
-/// (labels, `LS-PT-<CODE>` layers, `LANDSURVEY_POINT` XDATA). Each setup's
-/// QC is reported: the station coordinates the collector stored against ours,
-/// the backsight distance and elevation checks, and repeated shots of a
-/// point (check shots, face 2). `preview` reports without drawing.
-fn import_rw5(host: &mut dyn HostApi, cmd: &str) {
-    const USAGE: &str = "Usage: LS_RW5 <field.raw|rw5> [detail] [preview]";
+/// `LS_RAW <file> [detail] [preview]` (alias `LS_RW5`) — reduce a data
+/// collector raw file to coordinates and import the points like `LS_PNEZD`
+/// (labels, `LS-PT-<CODE>` layers, `LANDSURVEY_POINT` XDATA). The format is
+/// detected from the content: Sokkia SDR (SDR2x / SDR33) or RW5 (FieldGenius,
+/// TDS, SurvCE). Each setup's QC is reported: the station coordinates the
+/// collector stored against ours, the backsight azimuth, distance and
+/// elevation checks, and repeated shots of a point (check shots, face 2).
+/// `preview` reports without drawing.
+fn import_raw(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_RAW <field.raw|rw5|sdr> [detail] [preview]";
     let (path, flags) = peel_keywords(first_arg(cmd), &["detail", "preview"]);
     if path.is_empty() {
         host.push_info(USAGE);
@@ -941,14 +943,14 @@ fn import_rw5(host: &mut dyn HostApi, cmd: &str) {
     let text = match read_text(path) {
         Ok(t) => t,
         Err(e) => {
-            host.push_error(&format!("LS_RW5: cannot read \"{path}\": {e}"));
+            host.push_error(&format!("LS_RAW: cannot read \"{path}\": {e}"));
             return;
         }
     };
-    let r = rw5::reduce(&text);
+    let (format, r) = rw5::reduce_any(&text);
     if r.points.is_empty() {
         host.push_error(&format!(
-            "LS_RW5: no points reduced from \"{path}\". {}",
+            "LS_RAW: no points reduced from \"{path}\" ({format}). {}",
             r.warnings.join("; ")
         ));
         return;
@@ -971,13 +973,13 @@ fn import_rw5(host: &mut dyn HostApi, cmd: &str) {
                 description: p.description.clone(),
             })
             .collect();
-        host.push_undo("LS_RW5 import");
+        host.push_undo("LS_RAW import");
         draw_survey_points(host, &points, flags.iter().any(|f| f == "detail"));
         host.bump_geometry();
         host.set_dirty();
     }
     host.push_output(&format!(
-        "LS_RW5{}: job {} - {} point(s) from {} setup(s), units {unit}.",
+        "LS_RAW{}: {format} job {} - {} point(s) from {} setup(s), units {unit}.",
         if preview { " preview" } else { "" },
         if r.job.is_empty() { "?" } else { &r.job },
         r.points.len(),
@@ -997,6 +999,9 @@ fn import_rw5(host: &mut dyn HostApi, cmd: &str) {
                 rw5::fmt_delta(d[2])
             ));
         }
+        if let Some(a) = s.bs_azimuth_error {
+            line.push_str(&format!("  BS azimuth vs coords {a:+.1}\""));
+        }
         if let (Some(h), Some(z)) = (s.bs_distance_error, s.bs_elevation_error) {
             line.push_str(&format!(
                 "  BS check dHD {} dZ {}",
@@ -1015,7 +1020,7 @@ fn import_rw5(host: &mut dyn HostApi, cmd: &str) {
         ));
     }
     for w in &r.warnings {
-        host.push_info(&format!("LS_RW5: {w}"));
+        host.push_info(&format!("LS_RAW: {w}"));
     }
 }
 
@@ -2259,7 +2264,7 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
         ));
     }
     if tagged.is_empty() {
-        host.push_error("LS_FINISH: no Land Survey points in the drawing. Import some first (LS_PNEZD, LS_LANDXML).");
+        host.push_error("LS_FINISH: no Land Survey points in the drawing. Import some first (LS_PNEZD, LS_RAW, LS_LANDXML).");
         return;
     }
     tagged.sort_by_key(|(h, _)| *h);
@@ -3158,12 +3163,12 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         std::fs::write(&path, RAW).expect("write raw");
 
         let mut host = TestHost::new();
-        import_rw5(&mut host, &format!("LS_RW5 {} preview", path.display()));
+        import_raw(&mut host, &format!("LS_RW5 {} preview", path.display()));
         assert_eq!(host.doc.entities().count(), 0);
         assert!(host.log.iter().any(|l| l.contains("3 point(s) from 2 setup(s)")), "{:?}", host.log);
 
         let mut host = TestHost::new();
-        import_rw5(&mut host, &format!("LS_RW5 {}", path.display()));
+        import_raw(&mut host, &format!("LS_RAW {}", path.display()));
         let _ = std::fs::remove_file(&path);
         let points: Vec<_> = host
             .doc

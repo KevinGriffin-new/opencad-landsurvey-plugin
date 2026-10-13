@@ -23,16 +23,17 @@ USAGE:
   landsurvey-cli helmert <pairs.csv> [--apply <points.csv>] [--anim out.svg] [--teach] [--csv out.csv] [-o out.dxf]
   landsurvey-cli resect  <shots.csv> [-o out.dxf]
   landsurvey-cli inverse <N1> <E1> <N2> <E2> [--anim out.svg]
-  landsurvey-cli rw5     <field.raw|rw5> [--csv out.csv]
+  landsurvey-cli raw     <field.raw|rw5|sdr> [--csv out.csv]   (alias: rw5)
   landsurvey-cli finish  <points.csv> [--mode strings|xyz] [--order shot|number] [-o out.dxf]
 
 Surface inputs are PNEZD CSV (point, northing, easting, elevation, desc) or
 LandXML (auto-detected). rts = Rotate/Translate/Scale about a base point (CCW+);
 --to translates the base to a new location. DXF layers: LS-TIN-*, LS-CUTFILL/
-LS-DATUM, LS-RTS-SRC/DST, LS-*-LABEL. rw5 reduces a FieldGenius / TDS / SurvCE
-raw file to coordinates, reports setup and backsight checks, and with --csv
-writes the points as PNEZD. finish connects coded points into field-to-finish
-figures (LS-LN-<CODE>) and lists them.";
+LS-DATUM, LS-RTS-SRC/DST, LS-*-LABEL. raw reduces a data collector raw file
+(RW5: FieldGenius / TDS / SurvCE; Sokkia SDR, detected from the content) to
+coordinates, reports setup and backsight checks, and with --csv writes the
+points as PNEZD. finish connects coded points into field-to-finish figures
+(LS-LN-<CODE>) and lists them.";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -57,7 +58,7 @@ fn run(args: &[String]) -> Result<String, String> {
         "helmert" => cmd_helmert(&args[1..]),
         "resect" => cmd_resect(&args[1..]),
         "inverse" => cmd_inverse(&args[1..]),
-        "rw5" => cmd_rw5(&args[1..]),
+        "raw" | "rw5" => cmd_raw(&args[1..]),
         "finish" => cmd_finish(&args[1..]),
         "" | "-h" | "--help" | "help" => Ok(USAGE.to_string()),
         other => Err(format!("unknown subcommand \"{other}\"\n\n{USAGE}")),
@@ -578,16 +579,16 @@ fn add_tin(d: &mut DxfBuilder, s: &Surface, layer: &str) {
 
 /// Read a text input file in whatever encoding it was exported in (UTF-8,
 /// UTF-16 with a BOM, or Windows-1252).
-fn cmd_rw5(args: &[String]) -> Result<String, String> {
+fn cmd_raw(args: &[String]) -> Result<String, String> {
     let (pos, opts) = split_args(args, &["--csv"]);
-    let path = pos.first().ok_or("usage: rw5 <field.raw|rw5> [--csv out.csv]")?;
+    let path = pos.first().ok_or("usage: raw <field.raw|rw5|sdr> [--csv out.csv]")?;
     let text = read_text(path).map_err(|e| format!("cannot read \"{path}\": {e}"))?;
-    let r = landsurvey::rw5::reduce(&text);
+    let (format, r) = landsurvey::rw5::reduce_any(&text);
     if r.points.is_empty() {
-        return Err(format!("no points reduced from \"{path}\": {}", r.warnings.join("; ")));
+        return Err(format!("no points reduced from \"{path}\" ({format}): {}", r.warnings.join("; ")));
     }
     let mut out = format!(
-        "job {} - {} point(s), {} setup(s)\n",
+        "{format} job {} - {} point(s), {} setup(s)\n",
         if r.job.is_empty() { "?" } else { &r.job },
         r.points.len(),
         r.setups.len()
@@ -597,6 +598,9 @@ fn cmd_rw5(args: &[String]) -> Result<String, String> {
         if let Some(d) = s.stored_delta {
             let f = landsurvey::rw5::fmt_delta;
             out.push_str(&format!("  stored-ours dN {} dE {} dZ {}", f(d[0]), f(d[1]), f(d[2])));
+        }
+        if let Some(a) = s.bs_azimuth_error {
+            out.push_str(&format!("  BS azimuth vs coords {a:+.1}\""));
         }
         if let (Some(h), Some(z)) = (s.bs_distance_error, s.bs_elevation_error) {
             let f = landsurvey::rw5::fmt_delta;

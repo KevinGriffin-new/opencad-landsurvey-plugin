@@ -35,17 +35,18 @@ impl CadModule for LandSurveyModule {
                             extensions: vec!["csv".to_string(), "txt".to_string()],
                         },
                     }),
-                    // Native picker -> "LS_RW5 <path>": reduce a data
-                    // collector raw file (FieldGenius / TDS / SurvCE RW5).
+                    // Native picker -> "LS_RAW <path>": reduce a data
+                    // collector raw file (RW5: FieldGenius / TDS / SurvCE;
+                    // Sokkia SDR), the format detected from the content.
                     RibbonItem::LargeTool(ToolDef {
-                        id: "LS_RW5",
+                        id: "LS_RAW",
                         label: "Import Raw",
                         icon: IconKind::Glyph("\u{2316}"), // ⌖ (instrument)
                         event: ModuleEvent::PluginFileDialog {
-                            command: "LS_RW5".to_string(),
+                            command: "LS_RAW".to_string(),
                             title: "Import data collector raw file".to_string(),
-                            filter_name: "RW5 / FieldGenius raw".to_string(),
-                            extensions: vec!["raw".to_string(), "rw5".to_string()],
+                            filter_name: "Raw data (RW5, FieldGenius, Sokkia SDR)".to_string(),
+                            extensions: vec!["raw".to_string(), "rw5".to_string(), "sdr".to_string()],
                         },
                     }),
                     RibbonItem::LargeTool(ToolDef {
