@@ -10,7 +10,9 @@ exports the two C symbols the host loader expects (via
 
 - **Points** — PNEZD / PENZD import (delimiter and encoding auto-detected, alphanumeric
   names kept, optional preview); labeled points grouped onto per-feature-code
-  layers; bearing/distance line labels via `LS_INVERSE … draw`; a point list.
+  layers; point labels for number, elevation and description, each on its own
+  layer (`LS_POINTLABEL`); bearing/distance line labels via `LS_INVERSE … draw`;
+  a point list.
 - **Field data** — data collector raw files (TDS / Carlson **RW5**, FieldGenius `.raw`,
   SurvCE; **Sokkia SDR**) reduced to coordinates with per-setup backsight and
   check-shot QC.
