@@ -25,6 +25,18 @@ use landsurvey::{cogo, landxml, plan, pnezd, resection, rw5, transform, viz};
 /// Record values: `[String(point_number), String(description)]`.
 pub const XDATA_POINT: &str = "LANDSURVEY_POINT";
 
+/// XDATA application tagging a point label, so selecting the label shows the
+/// point it belongs to. Record values: `[String(point_number),
+/// String(description), String(elevation), String(field)]`, `field` being
+/// `number`, `elevation` or `description`. `LS_POINTLABEL` replaces every
+/// entity carrying it when it redraws labels.
+pub const XDATA_LABEL: &str = "LANDSURVEY_LABEL";
+
+/// Point label layers, one per field, so each can be turned off.
+const LABEL_LAYER_NUMBER: &str = "LS-PTNUM";
+const LABEL_LAYER_ELEVATION: &str = "LS-PTELEV";
+const LABEL_LAYER_DESCRIPTION: &str = "LS-PTDESC";
+
 /// XDATA application tagging entities imported from a recognized plan.
 /// Record values: `[String(source_filename)]`.
 pub const XDATA_PLAN: &str = "LANDSURVEY_PLAN";
@@ -83,7 +95,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
     match verb {
         "LS_HELLO" => {
             host.push_info(
-                "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL. \
+                "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL, LS_POINTLABEL. \
                  Field-to-finish: LS_FINISH (lines, symbols), LS_LIBRARY. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
@@ -103,6 +115,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_AUTOLABEL" => {
             auto_label_toggle(host, cmd);
+            true
+        }
+        "LS_POINTLABEL" => {
+            point_label_cmd(host, cmd);
             true
         }
         "LS_IMPORTPLAN" => {
@@ -304,7 +320,10 @@ fn draw_survey_points(
     // Hug the marker: clear its arm (~half the display size) plus a small gap,
     // matching MSannotate's ~0.47×H point-number offset for a small marker.
     let off = marker * 0.5 + h * 0.3;
-    let auto_label = !crate::state::state().suppress_labels;
+    let (auto_label, fields) = {
+        let st = crate::state::state();
+        (!st.suppress_labels, if detail { crate::state::LabelFields::ALL } else { st.label_fields })
+    };
 
     // One bulk add: per-point round trips made large files quadratic (#38).
     let mut batch = Batch::new();
@@ -320,7 +339,9 @@ fn draw_survey_points(
         batch.add_tagged(pt, &layer, rec);
 
         if auto_label {
-            draw_point_label(&mut batch, p, h, off, &layer, detail);
+            for (text, layer, rec) in point_labels(p, h, off, fields) {
+                batch.add_tagged(text, layer, rec);
+            }
         }
     }
     let accepted = batch.commit(host);
@@ -396,46 +417,136 @@ fn label_height(points: &[pnezd::PnezdPoint]) -> f64 {
     ((maxx - minx).max(maxy - miny) / 40.0).max(1.0)
 }
 
-/// Draw a point's label up-right of the mark: the point number always, plus an
-/// elevation + description detail line below it when `show_detail` is set. Both
-/// go on `layer`.
-fn draw_point_label(
-    batch: &mut Batch,
+/// A point's labels, up-right of the mark: the number at text height `h`,
+/// then the elevation and the description on the lines below it at 0.75 `h`,
+/// each on its own layer and tagged `LANDSURVEY_LABEL` with the point's data.
+/// A zero elevation (a file without elevations) and an empty description are
+/// not labelled.
+fn point_labels(
     p: &pnezd::PnezdPoint,
     h: f64,
     off: f64,
-    layer: &str,
-    show_detail: bool,
-) {
+    fields: crate::state::LabelFields,
+) -> Vec<(EntityType, &'static str, ExtendedDataRecord)> {
     let x = p.easting + off;
-    let y = p.northing + off;
-    batch.add(
-        EntityType::Text(Text::with_value(p.number.clone(), Vector3::new(x, y, 0.0)).with_height(h)),
-        layer,
-    );
-
-    if !show_detail {
-        return;
+    let mut y = p.northing + off;
+    let elevation = format!("{:.2}", p.elevation);
+    let mut lines: Vec<(String, f64, &'static str, &'static str)> = Vec::new();
+    if fields.number {
+        lines.push((p.number.clone(), h, LABEL_LAYER_NUMBER, "number"));
     }
-
-    let mut detail = String::new();
-    if p.elevation != 0.0 {
-        detail.push_str(&format!("{:.2}", p.elevation));
+    if fields.elevation && p.elevation != 0.0 {
+        lines.push((elevation.clone(), h * 0.75, LABEL_LAYER_ELEVATION, "elevation"));
     }
-    if !p.description.is_empty() {
-        if !detail.is_empty() {
-            detail.push(' ');
+    if fields.description && !p.description.trim().is_empty() {
+        lines.push((p.description.clone(), h * 0.75, LABEL_LAYER_DESCRIPTION, "description"));
+    }
+    let mut out = Vec::with_capacity(lines.len());
+    for (i, (value, height, layer, field)) in lines.into_iter().enumerate() {
+        if i > 0 {
+            y -= height * 1.4;
         }
-        detail.push_str(&p.description);
+        let mut rec = ExtendedDataRecord::new(XDATA_LABEL);
+        for v in [&p.number, &p.description, &elevation, &field.to_string()] {
+            rec.add_value(XDataValue::String(v.clone()));
+        }
+        let text = Text::with_value(value, Vector3::new(x, y, 0.0)).with_height(height);
+        out.push((EntityType::Text(text), layer, rec));
     }
-    if !detail.is_empty() {
-        batch.add(
-            EntityType::Text(
-                Text::with_value(detail, Vector3::new(x, y - h * 1.3, 0.0)).with_height(h * 0.75),
-            ),
-            layer,
-        );
+    out
+}
+
+/// `LS_POINTLABEL [NUMBER] [ELEVATION] [DESCRIPTION] | ALL | NONE` — choose
+/// which fields label the Land Survey points, each on its own layer
+/// (`LS-PTNUM`, `LS-PTELEV`, `LS-PTDESC`), and redraw the labels of the points
+/// already in the drawing (replacing the ones a previous run drew). Later
+/// imports use the same choice. With no argument, reports it.
+fn point_label_cmd(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_POINTLABEL [NUMBER] [ELEVATION] [DESCRIPTION] | ALL | NONE";
+    let words: Vec<String> = cmd.split_whitespace().skip(1).map(|w| w.to_ascii_uppercase()).collect();
+    let current = crate::state::state().label_fields;
+    let fields = if words.is_empty() {
+        let on: Vec<&str> = [("number", current.number), ("elevation", current.elevation), ("description", current.description)]
+            .iter()
+            .filter(|(_, on)| *on)
+            .map(|(n, _)| *n)
+            .collect();
+        host.push_output(&format!(
+            "LS_POINTLABEL: points are labelled with {}. {USAGE}",
+            if on.is_empty() { "nothing".to_string() } else { on.join(", ") }
+        ));
+        return;
+    } else {
+        let mut f = crate::state::LabelFields { number: false, elevation: false, description: false };
+        for w in &words {
+            match w.as_str() {
+                "NUMBER" | "NUM" | "PN" => f.number = true,
+                "ELEVATION" | "ELEV" | "Z" => f.elevation = true,
+                "DESCRIPTION" | "DESC" | "D" => f.description = true,
+                "ALL" => f = crate::state::LabelFields::ALL,
+                "NONE" if words.len() == 1 => {}
+                _ => {
+                    host.push_info(USAGE);
+                    return;
+                }
+            }
+        }
+        f
+    };
+    crate::state::state().label_fields = fields;
+
+    // Redraw: the points in the drawing, and the labels drawn for them before.
+    let mut points: Vec<(codec::Handle, pnezd::PnezdPoint)> = Vec::new();
+    let mut old: Vec<codec::Handle> = Vec::new();
+    for e in host.document().entities() {
+        if e.common().extended_data.get_record(XDATA_LABEL).is_some() {
+            old.push(e.common().handle);
+            continue;
+        }
+        if let (EntityType::Point(p), Some((number, description))) = (e, named_tag(e, XDATA_POINT)) {
+            points.push((
+                e.common().handle,
+                pnezd::PnezdPoint {
+                    number,
+                    northing: p.location.y,
+                    easting: p.location.x,
+                    elevation: p.location.z,
+                    description,
+                },
+            ));
+        }
     }
+    points.sort_by_key(|(h, _)| *h);
+    let points: Vec<pnezd::PnezdPoint> = points.into_iter().map(|(_, p)| p).collect();
+    host.push_undo("LS_POINTLABEL");
+    let removed = old.iter().filter(|&&h| host.remove_entity(h)).count();
+    let mut drawn = 0;
+    if !points.is_empty() {
+        let h = label_height(&points);
+        let marker = host.document().header.point_display_size;
+        let off = marker * 0.5 + h * 0.3;
+        let mut batch = Batch::new();
+        for p in &points {
+            for (text, layer, rec) in point_labels(p, h, off, fields) {
+                batch.add_tagged(text, layer, rec);
+                drawn += 1;
+            }
+        }
+        batch.commit(host);
+    }
+    host.bump_geometry();
+    host.set_dirty();
+    let on: Vec<&str> = [("number", fields.number), ("elevation", fields.elevation), ("description", fields.description)]
+        .iter()
+        .filter(|(_, on)| *on)
+        .map(|(n, _)| *n)
+        .collect();
+    host.push_output(&format!(
+        "LS_POINTLABEL: {} point(s) labelled with {} ({drawn} label(s)){}.",
+        points.len(),
+        if on.is_empty() { "nothing".to_string() } else { on.join(", ") },
+        if removed > 0 { format!("; replaced {removed} earlier label(s)") } else { String::new() }
+    ));
 }
 
 /// `LS_INVERSE <N1> <E1> <N2> <E2>` — distance + bearing between two coords.
@@ -3107,6 +3218,7 @@ mod tests {
     /// APPID re-write on the first point must replace, not duplicate).
     #[test]
     fn pnezd_import_is_batched_and_keeps_tags() {
+        let _lock = finish_lock();
         let n = 6_000; // with labels, 12 000 entities: three chunks
         let src = pnezd_file("batch", n);
         let mut host = TestHost::new();
@@ -3142,10 +3254,95 @@ mod tests {
         assert_eq!(tag, Some(("1".to_string(), "TOPO".to_string())));
     }
 
+    /// #38 follow-up: a label carries its point's data, so selecting the label
+    /// (the obvious thing to click) shows the point, its description and its
+    /// elevation; LS_POINTLABEL chooses the fields, each on its own layer, and
+    /// redraws them without doubling.
+    #[test]
+    fn point_labels_carry_point_data_and_are_configurable() {
+        let _lock = finish_lock();
+        crate::state::state().label_fields = crate::state::LabelFields::default();
+        let dir = std::env::temp_dir().join(format!("ls_labels_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("pts.csv");
+        // The five points from the #38 thread.
+        std::fs::write(
+            &src,
+            "1,5000.000,1000.000,100.00,IP\n2,5100.250,1020.500,101.25,IP\n3,5050.000,1100.000,99.80,TREE\n\
+             4,4990.100,1080.400,100.40,CP\n5,5025.000,1050.000,100.10,CP\n",
+        )
+        .unwrap();
+        let mut host = TestHost::new();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+
+        let labels = |host: &TestHost| -> Vec<(String, String, Vec<String>)> {
+            let mut v: Vec<_> = host
+                .doc
+                .entities()
+                .filter_map(|e| match e {
+                    EntityType::Text(t) => {
+                        let rec = e.common().extended_data.get_record(XDATA_LABEL)?;
+                        let vals = rec
+                            .values
+                            .iter()
+                            .filter_map(|v| match v {
+                                XDataValue::String(s) => Some(s.clone()),
+                                _ => None,
+                            })
+                            .collect();
+                        Some((t.value.clone(), e.common().layer.clone(), vals))
+                    }
+                    _ => None,
+                })
+                .collect();
+            v.sort();
+            v
+        };
+        // By default: the number only, on LS-PTNUM, carrying the point's data.
+        let got = labels(&host);
+        assert_eq!(got.len(), 5);
+        assert_eq!(got[0], ("1".into(), "LS-PTNUM".into(), vec!["1".into(), "IP".into(), "100.00".into(), "number".into()]));
+        // The text height Travis saw: the survey's extent / 40.
+        let t = host.doc.entities().find_map(|e| match e {
+            EntityType::Text(t) if t.value == "1" => Some(t.height),
+            _ => None,
+        });
+        assert!((t.unwrap() - 110.15 / 40.0).abs() < 1e-9);
+        // And the point itself carries the elevation as its Z.
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Point(p) if p.location.z == 100.0)));
+
+        point_label_cmd(&mut host, "LS_POINTLABEL ALL");
+        let got = labels(&host);
+        assert_eq!(got.len(), 15, "{got:?}");
+        assert!(got.iter().any(|l| l.0 == "101.25" && l.1 == "LS-PTELEV"));
+        assert!(got.iter().any(|l| l.0 == "TREE" && l.1 == "LS-PTDESC"));
+        assert!(host.log.last().unwrap().contains("5 point(s) labelled with number, elevation, description (15 label(s)); replaced 5"), "{:?}", host.log);
+
+        point_label_cmd(&mut host, "LS_POINTLABEL desc");
+        assert_eq!(labels(&host).len(), 5);
+        assert!(labels(&host).iter().all(|l| l.1 == "LS-PTDESC"));
+        // Later imports follow the choice.
+        let more = dir.join("more.csv");
+        std::fs::write(&more, "6,5000,1200,90,FH\n").unwrap();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", more.display()));
+        assert!(labels(&host).iter().any(|l| l.0 == "FH"));
+
+        point_label_cmd(&mut host, "LS_POINTLABEL NONE");
+        assert!(labels(&host).is_empty());
+        host.log.clear();
+        point_label_cmd(&mut host, "LS_POINTLABEL");
+        assert!(host.log[0].starts_with("LS_POINTLABEL: points are labelled with nothing."), "{:?}", host.log);
+        point_label_cmd(&mut host, "LS_POINTLABEL sideways");
+        assert!(host.log.last().unwrap().starts_with("Usage: LS_POINTLABEL"));
+        crate::state::state().label_fields = crate::state::LabelFields::default();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// When the host drops a chunk, the import says so and counts only the
     /// points that landed.
     #[test]
     fn pnezd_import_reports_a_refused_chunk() {
+        let _lock = finish_lock();
         let n = 6_000;
         let src = pnezd_file("short", n);
         let mut host = TestHost::new();
@@ -3574,7 +3771,7 @@ mod tests {
     /// document has no host, so the writer needs this done by hand for the
     /// EED app references to resolve.
     fn register_ls_app_ids(doc: &mut CadDocument) {
-        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE, XDATA_FIGURE, XDATA_SYMBOL] {
+        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE, XDATA_FIGURE, XDATA_SYMBOL, XDATA_LABEL] {
             if !doc.app_ids.contains(name) {
                 let mut app = AppId::new(name);
                 app.set_handle(doc.allocate_handle());
@@ -3617,6 +3814,7 @@ mod tests {
     /// because the last-imported LandXML units live in process-global state.
     #[test]
     fn landxml_import_export_roundtrip() {
+        let _lock = finish_lock();
         let dir = std::env::temp_dir().join(format!("ls_lx_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let src = dir.join("in file.xml"); // a space in the path
@@ -3703,6 +3901,7 @@ mod tests {
     /// profile) survives LS_LANDXML → drawing → LS_LANDXMLOUT.
     #[test]
     fn landxml_alignment_roundtrip_through_drawing() {
+        let _lock = finish_lock();
         const XML: &str =
             include_str!("../crates/landsurvey/tests/fixtures/landxml-alignments/aplitop-1.xml");
         let dir = std::env::temp_dir().join(format!("ls_lx_al_{}", std::process::id()));
@@ -3751,6 +3950,7 @@ mod tests {
     /// Cross sections and a ground profile draw as views and export back.
     #[test]
     fn landxml_sections_and_ground_profile_roundtrip() {
+        let _lock = finish_lock();
         const XML: &str = r#"<LandXML><Units><Metric linearUnit="meter"/></Units>
 <Alignments><Alignment name="CL" staStart="100">
  <CoordGeom><Line><Start>0 0</Start><End>0 200</End></Line></CoordGeom>
@@ -3798,6 +3998,7 @@ mod tests {
     /// label point, and an unlabelled parcel exports its area centroid.
     #[test]
     fn landxml_lot_labels() {
+        let _lock = finish_lock();
         let dir = std::env::temp_dir().join(format!("ls_lx_lbl_{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let src = dir.join("lot.xml");
@@ -3860,6 +4061,7 @@ mod tests {
     /// every lot's area intact.
     #[test]
     fn landxml_sample_roundtrip_through_drawing() {
+        let _lock = finish_lock();
         let Ok(path) = std::env::var("LANDXML_SAMPLE") else {
             return;
         };
@@ -3913,6 +4115,7 @@ mod tests {
     /// each setup's QC; `preview` draws nothing.
     #[test]
     fn rw5_import_draws_points_and_reports_setups() {
+        let _lock = finish_lock();
         const RAW: &str = "\
 JB,NMDEMO,DT10-23-2010,TM23:14:07
 MO,AD0,UN1,SF1.000000,EC0,EO0.0,AU0

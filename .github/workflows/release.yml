@@ -12,6 +12,23 @@ name: release
 #                    the default GITHUB_TOKEN: a tag the bot pushes would never
 #                    fire the `push` trigger above, so the bot calls this
 #                    workflow directly instead of relying on the tag event.
+#                    The caller must pass `secrets: inherit` for macOS signing.
+#   workflow_dispatch — rebuild an existing tag by hand. With `dry_run` it
+#                    builds, signs and notarizes but publishes nothing, which is
+#                    how to exercise the signing path without cutting a release.
+#
+# macOS: the dylib is signed with the Developer ID and notarized. A Developer
+# ID-signed Open CAD Studio runs with the hardened runtime, whose library
+# validation loads only plugins signed with the same Team ID. An ad-hoc dylib
+# is refused there ("mapping process and mapped file (non-platform) have
+# different Team IDs"); ad-hoc hosts load either. Required secrets, the same
+# ones KevinGriffin-new/OpenCADStudio signs with:
+#   MACOS_CERT_P12        base64 of the "Developer ID Application" cert+key .p12
+#   MACOS_CERT_PASSWORD   passphrase of that .p12
+#   APPLE_ID              Apple ID email for notarization
+#   APPLE_APP_PASSWORD    app-specific password (appleid.apple.com)
+#   APPLE_TEAM_ID         10-char team id the signature must carry
+# A missing secret fails the release rather than shipping an unsigned dylib.
 on:
   push:
     tags: ["v*"]
@@ -21,6 +38,16 @@ on:
         description: "Tag to build and publish (e.g. v0.4.6). Must already exist."
         required: true
         type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to rebuild (e.g. v0.4.22)"
+        required: true
+        type: string
+      dry_run:
+        description: "Build, sign and notarize, but publish nothing"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -98,6 +125,90 @@ jobs:
           # the host loader accepts any name with the right extension.
           cp target/release/*.${{ matrix.ext }} "dist/${{ matrix.asset }}"
           python .github/scripts/build_metadata.py --output dist/plugin.toml --build-info "dist/${{ matrix.asset }}.build.json"
+
+      - name: Import the Developer ID certificate
+        if: runner.os == 'macOS'
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PW: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # An empty secret decodes to an empty file and `security import`
+          # then fails with an opaque "parameters were not valid".
+          [ -n "$CERT_P12" ] || { echo "::error::MACOS_CERT_P12 is not set; refusing to publish an unsigned macOS plugin"; exit 1; }
+          KC=$RUNNER_TEMP/sign.keychain-db
+          KCPW=$(uuidgen)
+          security create-keychain -p "$KCPW" "$KC"
+          security set-keychain-settings -lut 3600 "$KC"
+          security unlock-keychain -p "$KCPW" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PW" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPW" "$KC"
+          security list-keychains -d user -s "$KC" login.keychain
+          IDENTITY=$(security find-identity -v -p codesigning "$KC" \
+            | sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' | head -1)
+          [ -n "$IDENTITY" ] || { echo "::error::no Developer ID Application identity in MACOS_CERT_P12"; exit 1; }
+          echo "KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          echo "IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Sign the dylib
+        if: runner.os == 'macOS'
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          LIB="dist/${{ matrix.asset }}"
+          codesign --force --timestamp --options runtime -s "$IDENTITY" "$LIB"
+          codesign --verify --strict --verbose=2 "$LIB"
+          # Library validation compares Team IDs, so check the one that matters.
+          got=$(codesign -dv "$LIB" 2>&1 | sed -n 's/^TeamIdentifier=//p')
+          echo "signed as: $IDENTITY (team $got)"
+          [ -n "$TEAM_ID" ] && [ "$got" = "$TEAM_ID" ] || { echo "::error::dylib Team ID '$got' is not APPLE_TEAM_ID"; exit 1; }
+
+      - name: Notarize the dylib
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          for v in APPLE_ID APPLE_APP_PASSWORD APPLE_TEAM_ID; do
+            [ -n "${!v}" ] || { echo "::error::$v is not set"; exit 1; }
+          done
+          # A bare dylib can't be stapled; Gatekeeper looks the ticket up
+          # online. Submitting it still clears quarantined downloads.
+          ZIP="$RUNNER_TEMP/notarize.zip"
+          ditto -c -k --norsrc --noextattr "dist/${{ matrix.asset }}" "$ZIP"
+          xcrun notarytool submit "$ZIP" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json" || true
+          cat "$RUNNER_TEMP/notary.json"
+          # Never let a malformed reply skip the error below: print "- -" then.
+          read -r ID STATUS < <(python3 -c '
+          import json, sys
+          try:
+              d = json.load(open(sys.argv[1]))
+          except Exception:
+              d = {}
+          print(d.get("id") or "-", d.get("status") or "-")' "$RUNNER_TEMP/notary.json")
+          [ "$ID" = - ] && ID=
+          if [ "$STATUS" != "Accepted" ]; then
+            # The log names the exact per-file cause of a rejection.
+            if [ -n "$ID" ]; then
+              xcrun notarytool log "$ID" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" || true
+              echo "::error::notarization $STATUS; Apple's log above names the cause"
+            else
+              # No submission id: Apple refused the request itself. A 403 here
+              # means the developer agreement needs re-accepting.
+              echo "::error::notarization submission failed; see the reply above"
+            fi
+            exit 1
+          fi
+
+      - name: Remove the signing keychain
+        if: always() && runner.os == 'macOS'
+        run: '[ -n "${KEYCHAIN:-}" ] && security delete-keychain "$KEYCHAIN" || true'
       - name: Test the published Windows host
         if: runner.os == 'Windows'
         shell: pwsh
@@ -120,6 +231,9 @@ jobs:
 
   publish:
     needs: build
+    # `inputs.dry_run` is null on push and workflow_call, so only a dispatched
+    # dry run skips publishing.
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
