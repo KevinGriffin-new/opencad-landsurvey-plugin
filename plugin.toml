@@ -1,8 +1,8 @@
 [plugin]
 id = "opencad.landsurvey"
 name = "Land Survey"
-version = "0.4.22"
-description = "Survey points, PNEZD, LandXML and data collector raw file (RW5, Sokkia SDR) import, field-to-finish linework, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection)."
+version = "0.4.23"
+description = "Survey points, PNEZD, LandXML and data collector raw file (RW5, Sokkia SDR) import, field-to-finish linework and monument symbols, point labels, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection)."
 author = "Kevin Griffin"
 license = "GPL-3.0-only"
 

@@ -28,7 +28,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: PLUGIN_ID,
     name: "Land Survey",
     version: env!("CARGO_PKG_VERSION"),
-    description: "Survey points, PNEZD, LandXML and data collector raw file (RW5, Sokkia SDR) import, field-to-finish linework, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection).",
+    description: "Survey points, PNEZD, LandXML and data collector raw file (RW5, Sokkia SDR) import, field-to-finish linework and monument symbols, point labels, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection).",
     api_version: ApiVersion::CURRENT,
     ribbon_order: 50,
     // Every XDATA application this plugin writes (see dispatch.rs and
