@@ -372,6 +372,32 @@ def run_suite(host: Path, package: Path, output: Path, expected_host: Path | Non
         polylines = sum(count for kind, count in rerun.get("by_type", {}).items() if "olyline" in kind)
         checks.check("LS_FINISH re-run replaces its figures over IPC", polylines == 2, str(rerun))
 
+        symbols, _, _ = run_host(
+            host,
+            stage,
+            [
+                {"op": "new"},
+                {"op": "run", "cmd": f"LS_PNEZD {coded.name}"},
+                {"op": "run", "cmd": "LS_FINISH symbols scale=500"},
+                {"op": "run", "cmd": "LS_FINISH symbols scale=500"},
+                {"op": "query"},
+            ],
+            output,
+            "08-symbols",
+        )
+        placed = [
+            item
+            for item in entities(symbols).get("entities", [])
+            if str(item.get("layer", "")) == "LS-SYM"
+        ]
+        # The host reports an INSERT as a "Block Reference" naming its block.
+        inserted = [item for item in placed if item.get("block") == "LS-SYM-FSIP"]
+        checks.check(
+            "LS_FINISH places the OIP symbol as one block insert",
+            len(placed) == 1 and len(inserted) == 1 and inserted[0].get("type") in ("Block Reference", "Insert"),
+            str(placed),
+        )
+
     checks.finish()
     (output / "summary.json").write_text(json.dumps({"checks": checks.passed, "status": "passed"}, indent=2) + "\n", encoding="utf-8")
 

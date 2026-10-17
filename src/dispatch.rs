@@ -6,12 +6,12 @@
 use std::fs;
 
 use codec::xdata::{ExtendedDataRecord, XDataValue};
-use codec::entities::{Mesh, Polyline3D};
+use codec::entities::{Insert, Mesh, Polyline3D, Solid};
 use codec::{
     Arc as CadArc, Circle, Color, EntityType, Line, LwPolyline, Point as CadPoint, Text, Vector2, Vector3,
 };
 
-use ocs_plugin_api::host::HostApi;
+use ocs_plugin_api::host::{HostApi, LayerConfig, TableOperation};
 
 
 use landsurvey::label_style::{self, LabelStyles};
@@ -60,6 +60,16 @@ pub const XDATA_FEATURE: &str = "LANDSURVEY_FEATURE";
 /// entity carrying it when re-run.
 pub const XDATA_FIGURE: &str = "LANDSURVEY_FIGURE";
 
+/// XDATA application tagging a symbol placed by `LS_FINISH` (a block insert,
+/// or each piece of plain geometry when the host cannot define blocks).
+/// Record values: `[String(point), String(code), String(symbol)]`.
+/// `LS_FINISH` replaces every entity carrying it when re-run.
+pub const XDATA_SYMBOL: &str = "LANDSURVEY_SYMBOL";
+
+/// Default plot scale `1:n` for symbols when neither `scale=` nor
+/// `LS_LABELSTYLE SCALE` gives one.
+const DEFAULT_PLOT_SCALE: f64 = 500.0;
+
 /// Default world-unit height for imported plan labels (the source JSON carries
 /// no text height).
 const PLAN_TEXT_HEIGHT: f64 = 2.0;
@@ -86,7 +96,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         "LS_HELLO" => {
             host.push_info(
                 "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL, LS_POINTLABEL. \
-                 Field-to-finish: LS_FINISH, LS_LIBRARY. \
+                 Field-to-finish: LS_FINISH (lines, symbols), LS_LIBRARY. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
@@ -2330,19 +2340,22 @@ fn list_points(host: &mut dyn HostApi) {
 }
 
 /// `LS_FINISH [lines] [symbols] [mode=strings|xyz] [order=shot|number]
-/// [preview]` — field-to-finish: connect the Land Survey points in the drawing
-/// into figures from their coded descriptions (see `landsurvey::finish` and
+/// [scale=<n>] [preview]` — field-to-finish: connect the Land Survey points in
+/// the drawing into figures from their coded descriptions, and place plan
+/// symbols on them (see `landsurvey::finish`, `landsurvey::symbols` and
 /// `docs/field-to-finish-design.md`). Points are taken in the order they were
-/// imported. Each figure is an LWPolyline on `LS-LN-<CODE>` tagged
-/// `LANDSURVEY_FIGURE`; a re-run first removes the figures it drew before, so
-/// edited codes never leave doubled lines. `preview` reports without drawing.
+/// imported. Figures are polylines tagged `LANDSURVEY_FIGURE`, symbols block
+/// inserts tagged `LANDSURVEY_SYMBOL`; a re-run first removes what it drew
+/// before, so edited codes never leave doubles. With neither `lines` nor
+/// `symbols` it does both. `preview` reports without drawing.
 fn finish(host: &mut dyn HostApi, cmd: &str) {
-    const USAGE: &str =
-        "Usage: LS_FINISH [lines] [symbols] [mode=strings|xyz] [order=shot|number] [preview]";
+    const USAGE: &str = "Usage: LS_FINISH [lines] [symbols] [mode=strings|xyz] [order=shot|number] [scale=<n>] [preview]";
     let mut opts = landsurvey::finish::Options::default();
     let (mut lines, mut symbols, mut preview) = (false, false, false);
+    let mut scale: Option<f64> = None;
     for arg in cmd.split_whitespace().skip(1) {
-        match arg.to_ascii_lowercase().as_str() {
+        let lower = arg.to_ascii_lowercase();
+        match lower.as_str() {
             "lines" => lines = true,
             "symbols" => symbols = true,
             "preview" => preview = true,
@@ -2350,31 +2363,36 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
             "mode=xyz" => opts.mode = landsurvey::finish::Mode::Xyz,
             "order=shot" => opts.order = landsurvey::finish::Order::Shot,
             "order=number" => opts.order = landsurvey::finish::Order::Number,
-            _ => {
-                host.push_info(USAGE);
-                return;
-            }
+            _ => match lower
+                .strip_prefix("scale=")
+                .map(|v| v.trim_start_matches("1:").parse::<f64>())
+            {
+                Some(Ok(n)) if n.is_finite() && n > 0.0 => scale = Some(n),
+                _ => {
+                    host.push_info(USAGE);
+                    return;
+                }
+            },
         }
     }
     if !lines && !symbols {
         lines = true;
         symbols = true;
     }
-    if symbols {
-        host.push_info("LS_FINISH: symbols are not built yet; drawing lines only.");
-    }
-    if !lines {
-        return;
-    }
 
     // Survey points in import order (handles are allocated increasing), and
-    // the figures a previous run drew.
+    // the figures and symbols a previous run drew.
     let mut tagged: Vec<(codec::Handle, landsurvey::finish::CodedPoint)> = Vec::new();
     let mut old: Vec<codec::Handle> = Vec::new();
+    let mut old_symbols: Vec<codec::Handle> = Vec::new();
     for e in host.document().entities() {
         let handle = e.common().handle;
         if e.common().extended_data.get_record(XDATA_FIGURE).is_some() {
             old.push(handle);
+            continue;
+        }
+        if e.common().extended_data.get_record(XDATA_SYMBOL).is_some() {
+            old_symbols.push(handle);
             continue;
         }
         let (EntityType::Point(p), Some((name, description))) = (e, named_tag(e, XDATA_POINT)) else {
@@ -2399,8 +2417,28 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
     let points: Vec<_> = tagged.into_iter().map(|(_, p)| p).collect();
 
     let library = crate::state::state().code_library.clone();
+    if !preview {
+        host.push_undo("LS_FINISH");
+    }
+    if lines {
+        finish_lines(host, &points, &opts, &library, &old, preview);
+    }
+    if symbols {
+        finish_symbols(host, &points, &library, scale, &old_symbols, preview);
+    }
+}
+
+/// The linework half of `LS_FINISH`.
+fn finish_lines(
+    host: &mut dyn HostApi,
+    points: &[landsurvey::finish::CodedPoint],
+    opts: &landsurvey::finish::Options,
+    library: &Option<(String, landsurvey::library::Library)>,
+    old: &[codec::Handle],
+    preview: bool,
+) {
     let lib = library.as_ref().map(|(_, l)| l);
-    let lw = landsurvey::finish::build_with(&points, &opts, lib);
+    let lw = landsurvey::finish::build_with(points, opts, lib);
     let mode = match opts.mode {
         landsurvey::finish::Mode::Strings => "string-numbered codes",
         landsurvey::finish::Mode::Xyz => "XYZ prefix codes",
@@ -2413,12 +2451,19 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
     let replaced = if preview {
         0
     } else {
-        host.push_undo("LS_FINISH");
         let n = old.iter().filter(|&&h| host.remove_entity(h)).count();
         let mut batch = Batch::new();
         let mut missing_linetypes = std::collections::BTreeSet::new();
+        // Layers this run created with the library's colour and linetype, and
+        // the ones it asked for (the host refuses when it cannot).
+        let mut styled_layers = std::collections::HashSet::new();
+        let mut asked = std::collections::HashSet::new();
         for f in &lw.figures {
             let style = lib.zip(f.row).map(|(l, r)| &l.codes[r]);
+            let layer = match style.map(|c| c.line_layer.trim()).filter(|l| !l.is_empty()) {
+                Some(l) => layer_name_safe(l),
+                None => format!("LS-LN-{}", layer_safe(&f.code)),
+            };
             let mut ent = if style.is_some_and(|c| c.three_d) {
                 let at = |v: &landsurvey::finish::Vertex| {
                     let p = &points[v.point];
@@ -2438,17 +2483,38 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
                 EntityType::LwPolyline(lw)
             };
             if let Some(c) = style {
-                if let Some(aci) = c.color {
-                    ent.common_mut().color = Color::from_index(aci);
-                }
                 let lt = c.line_type.trim();
-                if !lt.is_empty() && !["CONTINUOUS", "BYLAYER"].contains(&lt.to_ascii_uppercase().as_str()) {
-                    // A linetype the drawing has not loaded would not survive
-                    // a save; leave it by layer and say so.
-                    if host.document().line_types.contains(lt) {
-                        ent.common_mut().linetype = lt.to_string();
-                    } else {
-                        missing_linetypes.insert(lt.to_ascii_uppercase());
+                let named = !lt.is_empty() && !["CONTINUOUS", "BYLAYER"].contains(&lt.to_ascii_uppercase().as_str());
+                // A linetype the drawing has not loaded would not survive a
+                // save; leave it by layer and say so.
+                let linetype = (named && host.document().line_types.contains(lt)).then(|| lt.to_string());
+                if named && linetype.is_none() {
+                    missing_linetypes.insert(lt.to_ascii_uppercase());
+                }
+                // As AutoMAP does, a new layer takes the row's colour and
+                // linetype, so the figure stays by layer. Where the layer
+                // already exists, or the host cannot create it, the figure
+                // carries them itself.
+                if (c.color.is_some() || linetype.is_some())
+                    && !host.document().layers.contains(&layer)
+                    && asked.insert(layer.clone())
+                    && host
+                        .add_layer(LayerConfig {
+                            name: layer.clone(),
+                            color: c.color.map(Color::from_index),
+                            linetype: linetype.clone(),
+                            ..Default::default()
+                        })
+                        .is_some()
+                {
+                    styled_layers.insert(layer.clone());
+                }
+                if !styled_layers.contains(&layer) {
+                    if let Some(aci) = c.color {
+                        ent.common_mut().color = Color::from_index(aci);
+                    }
+                    if let Some(lt) = linetype {
+                        ent.common_mut().linetype = lt;
                     }
                 }
             }
@@ -2458,10 +2524,6 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
             for v in [&f.string, &f.code, first, last, &f.vertices.len().to_string()] {
                 rec.add_value(XDataValue::String(v.clone()));
             }
-            let layer = match style.map(|c| c.line_layer.trim()).filter(|l| !l.is_empty()) {
-                Some(l) => layer_name_safe(l),
-                None => format!("LS-LN-{}", layer_safe(&f.code)),
-            };
             batch.add_tagged(ent, &layer, rec);
         }
         batch.commit(host);
@@ -2469,6 +2531,14 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
             host.push_info(&format!(
                 "LS_FINISH: linetype(s) {} are not loaded in this drawing; those figures use their layer's linetype.",
                 missing_linetypes.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        if !styled_layers.is_empty() {
+            let mut names: Vec<_> = styled_layers.into_iter().collect();
+            names.sort();
+            host.push_output(&format!(
+                "LS_FINISH: created layer(s) {} with the library's colour and linetype.",
+                names.join(", ")
             ));
         }
         host.bump_geometry();
@@ -2481,7 +2551,7 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
         if preview { " preview" } else { "" },
         lw.figures.len(),
         points.len(),
-        match &library {
+        match library {
             Some((name, _)) => format!("library {name}"),
             None => "no library".to_string(),
         },
@@ -2506,6 +2576,201 @@ fn finish(host: &mut dyn HostApi, cmd: &str) {
     for w in &lw.warnings {
         host.push_info(&format!("LS_FINISH: {w}"));
     }
+}
+
+/// The symbols half of `LS_FINISH`: a built-in plan symbol on every point
+/// whose code has one — the library row's `SYMBOL` when a library is loaded,
+/// otherwise the built-in code list (`OIP` found iron post, `IP` placed, …).
+/// Each symbol is defined once as a block `LS-SYM-<NAME>` (drawn in plotted
+/// mm) and inserted at the plot scale; when the host cannot define blocks the
+/// symbols are drawn as plain geometry instead. Either way every piece is
+/// tagged `LANDSURVEY_SYMBOL` so a re-run replaces it.
+fn finish_symbols(
+    host: &mut dyn HostApi,
+    points: &[landsurvey::finish::CodedPoint],
+    library: &Option<(String, landsurvey::library::Library)>,
+    scale: Option<f64>,
+    old: &[codec::Handle],
+    preview: bool,
+) {
+    use landsurvey::symbols;
+    let (plot, feet) = {
+        let st = crate::state::state();
+        (scale.or(st.label_scale), st.label_imperial)
+    };
+    let defaulted = plot.is_none();
+    let plot = plot.unwrap_or(DEFAULT_PLOT_SCALE);
+    let per_mm = symbols::units_per_mm(plot, feet);
+
+    // (point, code, symbol, insert scale, layer)
+    let mut placed: Vec<(usize, String, symbols::Symbol, f64, String)> = Vec::new();
+    let mut unavailable = std::collections::BTreeSet::new();
+    for (i, p) in points.iter().enumerate() {
+        let code = p.description.split_whitespace().next().unwrap_or("").to_ascii_uppercase();
+        let hit = match library {
+            Some((_, lib)) => lib.lookup(&p.description).and_then(|r| {
+                let c = &lib.codes[r];
+                if c.symbol.trim().is_empty() {
+                    return None;
+                }
+                match symbols::for_symbol_file(&c.symbol) {
+                    Some(s) => {
+                        let layer = c.symbol_layer.trim();
+                        let layer = if layer.is_empty() { "LS-SYM".to_string() } else { layer_name_safe(layer) };
+                        Some((s, c.symbol_scale, layer))
+                    }
+                    None => {
+                        unavailable.insert(c.symbol.trim().to_string());
+                        None
+                    }
+                }
+            }),
+            None => symbols::default_for_code(&code).map(|s| (s, 1.0, "LS-SYM".to_string())),
+        };
+        if let Some((s, k, layer)) = hit {
+            placed.push((i, code, s, per_mm * k, layer));
+        }
+    }
+
+    let mut how = "";
+    let mut replaced = 0;
+    if !preview {
+        replaced = old.iter().filter(|&&h| host.remove_entity(h)).count();
+        // Define each symbol used once, as a block in plotted mm.
+        let mut names: Vec<&symbols::Symbol> = Vec::new();
+        for (_, _, s, _, _) in &placed {
+            if !names.iter().any(|n| n.name == s.name) {
+                names.push(s);
+            }
+        }
+        let mut blocks = true;
+        for s in &names {
+            let block = format!("LS-SYM-{}", s.name);
+            if host.document().block_records.get(&block).is_some() {
+                continue;
+            }
+            let parts: Vec<codec::Handle> = symbol_entities(s, [0.0, 0.0], 1.0)
+                .into_iter()
+                .map(|mut e| {
+                    e.common_mut().layer = "0".to_string();
+                    host.add_entity(e)
+                })
+                .collect();
+            let made = host.table_operation(TableOperation::BlockCreate {
+                name: block.clone(),
+                entities: parts.clone(),
+                base_point: [0.0, 0.0, 0.0],
+                erase_originals: true,
+                description: Some(format!("{} ({}), B.C. Reg. 229/2001 s. 29", s.title, if s.found { "found" } else { "placed" })),
+            });
+            if let Err(e) = made {
+                for h in parts {
+                    host.remove_entity(h);
+                }
+                // The drawing this plugin sees can trail the host's; a block
+                // the host already has is just as good.
+                if e.contains("already exists") {
+                    continue;
+                }
+                host.push_info(&format!("LS_FINISH: the host could not define symbol blocks ({e}); drawing symbols as plain geometry."));
+                blocks = false;
+                break;
+            }
+        }
+        let mut batch = Batch::new();
+        for (i, code, s, k, layer) in &placed {
+            let p = &points[*i];
+            let mut rec = ExtendedDataRecord::new(XDATA_SYMBOL);
+            for v in [&p.name, code, &s.name.to_string()] {
+                rec.add_value(XDataValue::String(v.clone()));
+            }
+            if blocks {
+                let ins = Insert::new(format!("LS-SYM-{}", s.name), Vector3::new(p.easting, p.northing, 0.0))
+                    .with_scale(*k, *k, *k);
+                batch.add_tagged(EntityType::Insert(ins), layer, rec);
+            } else {
+                for e in symbol_entities(s, [p.easting, p.northing], *k) {
+                    batch.add_tagged(e, layer, rec.clone());
+                }
+            }
+        }
+        batch.commit(host);
+        host.bump_geometry();
+        host.set_dirty();
+        how = if blocks { " as blocks" } else { " as plain geometry" };
+    }
+
+    let mut counts: Vec<(&'static str, &'static str, bool, usize)> = Vec::new();
+    for (_, _, s, _, _) in &placed {
+        match counts.iter_mut().find(|c| c.0 == s.name) {
+            Some(c) => c.3 += 1,
+            None => counts.push((s.name, s.title, s.found, 1)),
+        }
+    }
+    if placed.is_empty() {
+        host.push_output(&format!(
+            "LS_FINISH{}: no symbols; no point's code has one.{}",
+            if preview { " preview" } else { "" },
+            if replaced > 0 { format!(" Removed {replaced} symbol entit(ies) from the last run.") } else { String::new() }
+        ));
+        return;
+    }
+    host.push_output(&format!(
+        "LS_FINISH{}: {} symbol(s){how} at 1:{plot}{}.{}",
+        if preview { " preview" } else { "" },
+        placed.len(),
+        if defaulted { " (no plot scale set; use scale=<n> or LS_LABELSTYLE SCALE)" } else { "" },
+        if replaced > 0 { format!(" Replaced {replaced} symbol entit(ies) from the last run.") } else { String::new() }
+    ));
+    for (name, title, found, n) in counts {
+        host.push_output(&format!("  {name:<6} {n:>4}  {} {title}", if found { "found" } else { "placed" }));
+    }
+    if !unavailable.is_empty() {
+        host.push_info(&format!(
+            "LS_FINISH: no built-in symbol for {}; only the BC standard monument symbols are built in, and symbol drawings are not read yet.",
+            unavailable.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+}
+
+/// A symbol's primitives as entities, scaled by `k` and placed at `at`.
+/// Discs are zero-length donuts (a closed two-vertex polyline whose width is
+/// its radius); filled polygons are SOLIDs, fanned into triangles and quads.
+fn symbol_entities(s: &landsurvey::symbols::Symbol, at: [f64; 2], k: f64) -> Vec<EntityType> {
+    use landsurvey::symbols::Prim;
+    let v = |q: [f64; 2]| Vector3::new(q[0], q[1], 0.0);
+    let mut out = Vec::new();
+    for prim in &s.prims {
+        match prim.place(at, k) {
+            Prim::Circle { c, r } => out.push(EntityType::Circle(Circle::from_center_radius(v(c), r))),
+            Prim::Disc { c, r } => {
+                let mut lw = lwpolyline(&[(c[0] - r / 2.0, c[1], 1.0), (c[0] + r / 2.0, c[1], 1.0)], true);
+                lw.constant_width = r;
+                out.push(EntityType::LwPolyline(lw));
+            }
+            Prim::Poly { pts, closed } => {
+                let verts: Vec<(f64, f64, f64)> = pts.iter().map(|q| (q[0], q[1], 0.0)).collect();
+                out.push(EntityType::LwPolyline(lwpolyline(&verts, closed)));
+            }
+            Prim::Fill { pts } => {
+                // SOLID corners run 1-2 / 3-4 across, so a quad a-b-c-d is
+                // given as a, b, d, c.
+                let mut i = 1;
+                while i + 1 < pts.len() {
+                    let (a, b, c) = (pts[0], pts[i], pts[i + 1]);
+                    if i + 2 < pts.len() {
+                        let d = pts[i + 2];
+                        out.push(EntityType::Solid(Solid::new(v(a), v(b), v(d), v(c))));
+                        i += 2;
+                    } else {
+                        out.push(EntityType::Solid(Solid::new(v(a), v(b), v(c), v(c))));
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `LS_LIBRARY [LOAD <library.csv> | RESET | SHOW]` — the field-to-finish
@@ -2748,6 +3013,11 @@ mod tests {
         /// Accept this many `add_entities` calls, then return no handles, as
         /// the host does when a message is over its IPC size limit.
         bulk_limit: Option<usize>,
+        /// Answer `add_layer` and `table_operation(BlockCreate)` as the real
+        /// host (API v7) does; off, they are refused like the trait defaults.
+        scripted: bool,
+        /// `BlockCreate` requests accepted.
+        blocks_created: Vec<String>,
     }
 
     impl TestHost {
@@ -2758,6 +3028,8 @@ mod tests {
                 single_adds: 0,
                 bulk_adds: 0,
                 bulk_limit: None,
+                scripted: false,
+                blocks_created: Vec::new(),
             }
         }
     }
@@ -2804,6 +3076,46 @@ mod tests {
                 .collect()
         }
         fn bump_geometry(&mut self) {}
+        fn add_layer(&mut self, config: LayerConfig) -> Option<codec::Handle> {
+            if !self.scripted || self.doc.layers.contains(&config.name) {
+                return None;
+            }
+            let mut layer = codec::tables::Layer::new(&config.name);
+            let handle = self.doc.allocate_handle();
+            layer.set_handle(handle);
+            if let Some(c) = config.color {
+                layer.color = c;
+            }
+            if let Some(lt) = config.linetype {
+                layer.line_type = lt;
+            }
+            self.doc.layers.add(layer).ok()?;
+            Some(handle)
+        }
+        fn table_operation(&mut self, operation: TableOperation) -> Result<codec::Handle, String> {
+            match operation {
+                TableOperation::BlockCreate { name, entities, erase_originals, .. } if self.scripted => {
+                    if self.doc.block_records.get(&name).is_some() {
+                        return Err(format!("block {name:?} already exists"));
+                    }
+                    if entities.is_empty() {
+                        return Err("a block needs at least one entity".into());
+                    }
+                    let mut br = codec::tables::BlockRecord::new(&name);
+                    let handle = self.doc.allocate_handle();
+                    br.set_handle(handle);
+                    self.doc.block_records.add(br).map_err(|e| e.to_string())?;
+                    if erase_originals {
+                        for h in entities {
+                            self.doc.remove_entity(h);
+                        }
+                    }
+                    self.blocks_created.push(name);
+                    Ok(handle)
+                }
+                _ => Err("table operations are not supported by this host".into()),
+            }
+        }
         fn read_record(
             &self,
             handle: codec::Handle,
@@ -3130,7 +3442,7 @@ mod tests {
         assert_eq!(got.len(), 2, "{got:?}");
         assert_eq!(got[1].2, 4);
         assert!(host.log.iter().any(|l| l.contains("Replaced 2 figure(s)")), "{:?}", host.log);
-        assert!(host.log.iter().any(|l| l.contains("symbols are not built yet")), "{:?}", host.log);
+        assert!(host.log.iter().any(|l| l == "LS_FINISH: no symbols; no point's code has one."), "{:?}", host.log);
 
         let out = dir.join("out.xml");
         export_landxml(&mut host, &format!("LS_LANDXMLOUT {} features", out.display()));
@@ -3268,6 +3580,168 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// PNEZD rows coded with monuments, imported into a fresh test host.
+    fn monument_host(scripted: bool) -> (TestHost, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ls_sym_{scripted}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("pts.csv");
+        std::fs::write(
+            &src,
+            "1,100,200,10,OIP LOT 28\n2,100,210,10,IP\n3,105,210,10,OCM\n4,110,210,10,G\n\
+             5,120,220,10,FE1\n6,120,230,10,FE1\n7,130,230,10,OIP\n",
+        )
+        .unwrap();
+        let mut host = TestHost::new();
+        host.scripted = scripted;
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+        host.log.clear();
+        (host, dir)
+    }
+
+    fn symbol_tags(host: &TestHost) -> Vec<(String, String, String, String)> {
+        let mut out: Vec<_> = host
+            .doc
+            .entities()
+            .filter_map(|e| {
+                let rec = e.common().extended_data.get_record(XDATA_SYMBOL)?;
+                let v: Vec<String> = rec
+                    .values
+                    .iter()
+                    .filter_map(|v| match v {
+                        XDataValue::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                Some((v[0].clone(), v[2].clone(), e.common().layer.clone(), format!("{:?}", std::mem::discriminant(e))))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// With block support, each symbol is defined once (in plotted mm) and
+    /// inserted at the plot scale; a re-run reuses the blocks.
+    #[test]
+    fn finish_symbols_as_blocks() {
+        let _lock = finish_lock();
+        crate::state::state().code_library = None;
+        let (mut host, dir) = monument_host(true);
+        finish(&mut host, "LS_FINISH symbols scale=1000");
+        assert_eq!(host.blocks_created, ["LS-SYM-FSIP", "LS-SYM-PSIP", "LS-SYM-CM"]);
+        let inserts: Vec<(String, f64, String)> = host
+            .doc
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Insert(i) => Some((i.block_name.clone(), i.x_scale(), e.common().layer.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inserts.len(), 4, "{inserts:?}");
+        assert!(inserts.iter().all(|(_, k, l)| (*k - 1.0).abs() < 1e-12 && l == "LS-SYM"), "{inserts:?}");
+        // The block's parts were erased from model space once defined.
+        assert!(!host.doc.entities().any(|e| matches!(e, EntityType::Solid(_) | EntityType::Circle(_))));
+        let log = host.log.join("\n");
+        assert!(log.contains("4 symbol(s) as blocks at 1:1000."), "{log}");
+        assert!(log.contains("FSIP      2  found standard iron post (Type 5)"), "{log}");
+        assert!(log.contains("CM        1  found control monument"), "{log}");
+
+        host.log.clear();
+        finish(&mut host, "LS_FINISH symbols scale=1000");
+        assert_eq!(host.blocks_created.len(), 3, "blocks re-created");
+        assert_eq!(symbol_tags(&host).len(), 4);
+        assert!(host.log[0].contains("Replaced 4 symbol entit(ies)"), "{:?}", host.log);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without block support, symbols are plain geometry at drawing size,
+    /// every piece tagged, and a re-run replaces them all.
+    #[test]
+    fn finish_symbols_fall_back_to_geometry() {
+        let _lock = finish_lock();
+        crate::state::state().code_library = None;
+        let (mut host, dir) = monument_host(false);
+        finish(&mut host, "LS_FINISH symbols scale=1000");
+        let log = host.log.join("\n");
+        assert!(log.contains("could not define symbol blocks"), "{log}");
+        assert!(log.contains("4 symbol(s) as plain geometry at 1:1000."), "{log}");
+        // The placed iron post (point 2): a 2.5 mm circle at 1:1000.
+        let circle = host
+            .doc
+            .entities()
+            .find_map(|e| match e {
+                EntityType::Circle(c) if named_tag(e, XDATA_SYMBOL).is_some_and(|t| t.0 == "2") => Some(c.clone()),
+                _ => None,
+            })
+            .expect("placed iron post");
+        assert_eq!((circle.center.x, circle.center.y, circle.radius), (210.0, 100.0, 1.25));
+        // The found one is a donut with no hole.
+        let disc = host
+            .doc
+            .entities()
+            .find_map(|e| match e {
+                EntityType::LwPolyline(l) if named_tag(e, XDATA_SYMBOL).is_some_and(|t| t.0 == "1") => Some(l.clone()),
+                _ => None,
+            })
+            .expect("found iron post");
+        assert!(disc.is_closed && disc.vertices.len() == 2 && (disc.constant_width - 1.25).abs() < 1e-12);
+        // No temporary block parts were left behind.
+        let tagged = symbol_tags(&host).len();
+        let untagged_solids = host
+            .doc
+            .entities()
+            .filter(|e| matches!(e, EntityType::Solid(_) | EntityType::Circle(_)) && named_tag(e, XDATA_SYMBOL).is_none())
+            .count();
+        assert_eq!(untagged_solids, 0);
+
+        finish(&mut host, "LS_FINISH symbols scale=1000");
+        assert_eq!(symbol_tags(&host).len(), tagged, "symbols doubled on re-run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A library's SYMBOL, SYM LAYER and SYM SCALE drive the symbols, symbol
+    /// drawings that are not built in are reported, and a figure layer the
+    /// library styles is created with its colour.
+    #[test]
+    fn finish_symbols_from_library() {
+        let _lock = finish_lock();
+        let (mut host, dir) = monument_host(true);
+        let lib = dir.join("lib.csv");
+        std::fs::write(
+            &lib,
+            "KEY,SYMBOL,SYM SCALE,SYM LAYER,CONNECT,LINE LAYER,COLOR,2D\n\
+             OIP,BLOCKS\\ICM_FSIP.DWG,2,BLOCK,0,,255,1\n\
+             OCM,BLOCKS\\MY_POST.DWG,1,BLOCK,0,,255,1\n\
+             FE,,0,,1,FENCE,1,1\n",
+        )
+        .unwrap();
+        library_cmd(&mut host, &format!("LS_LIBRARY LOAD {}", lib.display()));
+        finish(&mut host, "LS_FINISH scale=500");
+        library_cmd(&mut host, "LS_LIBRARY RESET");
+
+        let inserts: Vec<(String, f64, String)> = host
+            .doc
+            .entities()
+            .filter_map(|e| match e {
+                EntityType::Insert(i) => Some((i.block_name.clone(), i.x_scale(), e.common().layer.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(inserts, vec![("LS-SYM-FSIP".to_string(), 1.0, "BLOCK".to_string()); 2]);
+        let log = host.log.join("\n");
+        assert!(log.contains("no built-in symbol for BLOCKS\\MY_POST.DWG"), "{log}");
+        assert!(log.contains("created layer(s) FENCE with the library's colour"), "{log}");
+        let fence = host.doc.layers.get("FENCE").expect("FENCE layer");
+        assert_eq!(fence.color, Color::from_index(1));
+        // The figure itself stays by layer.
+        let fe = host
+            .doc
+            .entities()
+            .find(|e| named_tag(e, XDATA_FIGURE).is_some_and(|t| t.0 == "FE1"))
+            .expect("FE1");
+        assert_eq!(fe.common().color, Color::ByLayer);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Handle of the LS_FINISH figure whose string is `key`.
     fn common_handle_of(host: &TestHost, key: &str) -> codec::Handle {
         host.doc
@@ -3297,7 +3771,7 @@ mod tests {
     /// document has no host, so the writer needs this done by hand for the
     /// EED app references to resolve.
     fn register_ls_app_ids(doc: &mut CadDocument) {
-        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE, XDATA_FIGURE, XDATA_LABEL] {
+        for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE, XDATA_FIGURE, XDATA_SYMBOL, XDATA_LABEL] {
             if !doc.app_ids.contains(name) {
                 let mut app = AppId::new(name);
                 app.set_handle(doc.allocate_handle());

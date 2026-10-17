@@ -1,10 +1,14 @@
 # Field-to-finish: linework and symbols — design
 
-Status: **phases 1 and 2 built.** Phase 1 (`landsurvey::finish`, `LS_FINISH lines`):
+Status: **phases 1–3 built** (phase 3: symbols, see below). Phase 1 (`landsurvey::finish`, `LS_FINISH lines`):
 string-numbered and XYZ coding, ordering, closure, `Y` spurs, `*` joins, re-run
 safety. Phase 2 (`landsurvey::library`, `LS_LIBRARY`): AutoMAP CSV libraries with
 connect, line layer, colour, linetype, 2D/3D and width, AutoMAP lookup and
-wildcards. Later phases are still design.
+wildcards. Phase 3 (`landsurvey::symbols`, `LS_FINISH symbols`): the 21 s. 29(1)
+symbols as real blocks, inserted at the plot scale, with a plain-geometry
+fallback; figure layers created with the library's colour and linetype. Still
+to come from phase 3's list: `SYM TRIM` line trimming, `.dxf` user symbols and
+the MoTI preset (each its own change). Later phases are still design.
 
 Notes from building phase 2:
 
@@ -425,14 +429,18 @@ plugin, over the same IPC connection as `add_entity`:
 
 To do:
 
-1. Before drawing, create any missing figure layer with `add_layer`, taking
-   colour and linetype from the library row; set colour and linetype on the
-   figure only when the layer already existed with different properties.
-2. Find out whether the host can load a linetype by name (a `LINETYPE` load
-   command through `execute_command`), so `CENTER`, `HIDDEN` and the like
-   work in a blank drawing.
-3. Use `BlockCreate` for symbols in phase 3 (option B), not exploded
-   geometry.
+1. **Done (phase 3).** Before drawing, a missing figure layer is created
+   with `add_layer`, taking colour and linetype from the library row; the
+   figure carries them itself only when the layer already existed or the
+   host refused.
+2. Missing linetypes: API v7 also has `TableOperation::LinetypeCreate`
+   (a dash/gap pattern in drawing units), so standard ones such as `CENTER`,
+   `HIDDEN` and `DASHED` can be created when a library names them and the
+   drawing lacks them. Not done yet.
+3. **Done (phase 3).** Symbols are `BlockCreate` blocks (`LS-SYM-<NAME>`,
+   drawn in plotted mm, base point at the symbol centre) inserted at
+   `units per mm × SYM SCALE`; "already exists" from the host counts as
+   success, and any other refusal falls back to tagged plain geometry.
 4. The test host returns "not supported" for all of these (the trait
    defaults), so the glue must fall back to today's behaviour, and the
    field-test suite (real host) is where the scripted path gets checked.
