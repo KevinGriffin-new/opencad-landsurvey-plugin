@@ -32,6 +32,25 @@ pub struct StoredSurface {
     pub surface: Surface,
 }
 
+/// The point fields drawn as labels, each on its own layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LabelFields {
+    pub number: bool,
+    pub elevation: bool,
+    pub description: bool,
+}
+
+impl Default for LabelFields {
+    /// The point number only, as before labels were configurable.
+    fn default() -> Self {
+        LabelFields { number: true, elevation: false, description: false }
+    }
+}
+
+impl LabelFields {
+    pub const ALL: LabelFields = LabelFields { number: true, elevation: true, description: true };
+}
+
 /// Document-scoped Land Survey state.
 #[derive(Default)]
 pub struct LandSurveyState {
@@ -42,6 +61,8 @@ pub struct LandSurveyState {
     /// When true, `LS_PNEZD` imports points WITHOUT drawing number labels
     /// (toggled by `LS_AUTOLABEL OFF`). Default false = auto-labels on.
     pub suppress_labels: bool,
+    /// Which point fields are labelled (`LS_POINTLABEL`).
+    pub label_fields: LabelFields,
     /// MicroSurvey bearing/distance label styles (`LS_LABELSTYLE`); MSCAD's
     /// shipped BEARING1/DISTANCE1 until a job's config.json is loaded.
     pub label_styles: LabelStyles,

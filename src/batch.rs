@@ -37,12 +37,6 @@ impl Batch {
         Self::default()
     }
 
-    /// Queue `ent` on `layer`, without XDATA.
-    pub fn add(&mut self, mut ent: EntityType, layer: &str) {
-        ent.common_mut().layer = layer.to_string();
-        self.entities.push(ent);
-    }
-
     /// Queue `ent` on `layer`, carrying `rec`.
     pub fn add_tagged(&mut self, mut ent: EntityType, layer: &str, rec: ExtendedDataRecord) {
         ent.common_mut().layer = layer.to_string();
