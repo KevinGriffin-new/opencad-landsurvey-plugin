@@ -69,6 +69,11 @@ CODEC_TAGS = {
                    "fe69506cb99dea6f4c4a73b690a27fdf04403ea0"),
     "v2026.41": ("opencadcodec", "0.6.0", "github.com/HakanSeven12/opencadcodec",
                  "8189f833574c544fc57a1d773591014c3a5907c9"),
+    # v2026.42 renamed the package back to `acadrust` while staying in the
+    # opencadcodec repo, still imported under the key `codec`. gate-acadrust
+    # escalated on the rename; this is the fixture that re-pin left behind.
+    "v2026.42": ("acadrust", "0.6.4", "github.com/HakanSeven12/opencadcodec",
+                 "5d4f11ae38758caec540bc9819ff2c4120eeadb4"),
 }
 
 # How each tag spells [dependencies].acadrust in its Cargo.toml. The v0.8.8 row
@@ -88,6 +93,7 @@ MANIFEST_SHAPES = {
     "v2026.39": "git",
     "v2026.40.1": "git",
     "v2026.41": "git",
+    "v2026.42": "git",
 }
 
 API_WINDOWS = {
@@ -104,6 +110,7 @@ API_WINDOWS = {
     "v2026.39": (2, 7),
     "v2026.40.1": (3, 7),
     "v2026.41": (3, 7),
+    "v2026.42": (3, 10),
 }
 
 
@@ -630,14 +637,14 @@ def test_gate_source_identity_rejects_an_expanded_rev():
 
 
 def test_gate_source_identity_rejects_an_expanded_opencadcodec_rev():
-    """The same trap in the renamed package: v2026.41 writes rev = "8189f83"."""
+    """The same trap in the renamed package: v2026.42 writes rev = "5d4f11a"."""
     shipped = (REPO / "Cargo.toml").read_text(encoding="utf-8")
-    assert 'rev = "8189f83"' in shipped
+    assert 'rev = "5d4f11a"' in shipped
     expanded = shipped.replace(
-        'rev = "8189f83"', 'rev = "8189f833574c544fc57a1d773591014c3a5907c9"'
+        'rev = "5d4f11a"', 'rev = "5d4f11ae38758caec540bc9819ff2c4120eeadb4"'
     )
     with pytest.raises(rg.Escalate, match="abbreviated versus a full rev"):
-        rg.gate_source_identity(expanded, plugin_api("v2026.41"))
+        rg.gate_source_identity(expanded, plugin_api("v2026.42"))
 
 
 def test_gate_source_identity_rejects_the_legacy_patch_manifest():
@@ -781,21 +788,21 @@ def test_two_codecs_in_one_lockfile_escalate():
 
 
 def test_shipped_manifest_passes_every_gate_against_its_host():
-    """What we ship today, against the host it is pinned to (v2026.41)."""
+    """What we ship today, against the host it is pinned to (v2026.42)."""
     tag = shipped_host_tag()
-    assert tag == "v2026.41"
+    assert tag == "v2026.42"
     cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
     lock = (REPO / "Cargo.lock").read_text(encoding="utf-8")
     report = rg.gate_acadrust(host(tag, "Cargo.lock"), cargo, lock, tag=tag)
-    assert report["host_package"] == "opencadcodec"
+    assert report["host_package"] == "acadrust"
     rg.gate_source_identity(cargo, plugin_api(tag), host(tag, "Cargo.toml"))
-    assert rg.gate_abi(lock, CODEC_TAGS[tag][3])["package"] == "opencadcodec"
+    assert rg.gate_abi(lock, CODEC_TAGS[tag][3])["package"] == "acadrust"
     api = rg.gate_api_version(host(tag, "manifest.rs"), (REPO / "plugin.toml").read_text(encoding="utf-8"), tag)
-    assert api["ours"] == api["target"] == 7
+    assert api["ours"] == api["target"] == 10
 
 
 def test_codec_series_bump_escalates():
-    bumped = lock_with(("opencadcodec", "0.7.0",
+    bumped = lock_with(("acadrust", "0.7.0",
                         "git+https://github.com/HakanSeven12/opencadcodec.git?rev=abcdef0#" + "a" * 40))
     with pytest.raises(rg.Escalate, match="Cargo will not cross"):
         rg.gate_acadrust(bumped, (REPO / "Cargo.toml").read_text(encoding="utf-8"),
@@ -811,8 +818,8 @@ def test_rewrite_keeps_the_codec_package_and_key():
         api_version=7, patch=("https://github.com/HakanSeven12/opencadcodec.git",
                               "https://git@github.com/HakanSeven12/opencadcodec.git", "c" * 40),
     )
-    assert ('codec = { package = "opencadcodec", git = '
+    assert ('codec = { package = "acadrust", git = '
             '"https://github.com/HakanSeven12/opencadcodec.git", rev = "1234567"') in out
     # A [patch] entry is keyed by package name, not by our dependency key.
-    assert 'opencadcodec = { git = "https://git@github.com/HakanSeven12/opencadcodec.git"' in out
+    assert 'acadrust = { git = "https://git@github.com/HakanSeven12/opencadcodec.git"' in out
     assert rg.effective_acadrust(out) == ("https://git@github.com/HakanSeven12/opencadcodec.git", "c" * 40)
