@@ -1,15 +1,15 @@
 [plugin]
 id = "opencad.landsurvey"
 name = "Land Survey"
-version = "0.4.23"
+version = "0.4.24"
 description = "Survey points, PNEZD, LandXML and data collector raw file (RW5, Sokkia SDR) import, field-to-finish linework and monument symbols, point labels, TIN surfaces, earthwork volumes, COGO, and coordinate transforms (RTS / Helmert / resection)."
 author = "Kevin Griffin"
 license = "GPL-3.0-only"
 
 [opencad]
 # Must match API_VERSION exported by the linked ocs_plugin_api.
-# Studio 2026.41 uses API 7; generated build metadata is added during packaging.
-api_version = 7
+# Studio 2026.42 uses API 10; generated build metadata is added during packaging.
+api_version = 10
 ribbon_order = 50
 command_prefixes = ["LS_"]
 xdata_apps = ["LANDSURVEY_POINT", "LANDSURVEY_PLAN", "LANDSURVEY_SURFACE", "LANDSURVEY_PARCEL", "LANDSURVEY_FEATURE", "LANDSURVEY_FIGURE", "LANDSURVEY_SYMBOL", "LANDSURVEY_LABEL", "LANDSURVEY_ALIGN", "LANDSURVEY_PROFILE", "LANDSURVEY_XSECT"]
