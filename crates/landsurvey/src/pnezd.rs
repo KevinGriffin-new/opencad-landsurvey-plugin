@@ -300,9 +300,142 @@ fn parse_line(line: &str, fmt: &Format, upto: usize) -> Option<PnezdPoint> {
     })
 }
 
+/// Column order for [`write`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Order {
+    /// `P, N, E, Z, D`.
+    Pnezd,
+    /// `P, E, N, Z, D`.
+    Penzd,
+}
+
+/// Write points as delimited text, one per line (CRLF, as data collectors and
+/// Windows survey software expect), coordinates fixed to `decimals` places.
+/// `delimiter` is a comma or a tab; a field containing the delimiter, a quote
+/// or a line break is double-quoted CSV style, so [`parse`] reads it back.
+pub fn write(points: &[PnezdPoint], order: Order, delimiter: char, decimals: usize) -> String {
+    let field = |s: &str| -> String {
+        if s.contains(delimiter) || s.contains('"') || s.contains('\n') || s.contains('\r') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    };
+    let d = delimiter.to_string();
+    let mut out = String::new();
+    for p in points {
+        let (n, e) = (format!("{:.decimals$}", p.northing), format!("{:.decimals$}", p.easting));
+        let (a, b) = match order {
+            Order::Pnezd => (n, e),
+            Order::Penzd => (e, n),
+        };
+        let z = format!("{:.decimals$}", p.elevation);
+        out.push_str(&[field(&p.number), a, b, z, field(&p.description)].join(&d));
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// Sort key for point numbers: numeric names in numeric order, before
+/// alphanumeric ones ("CP1", "TBM") in text order.
+pub fn number_sort_key(number: &str) -> (u8, u64, String) {
+    match number.trim().parse::<u64>() {
+        Ok(n) => (0, n, String::new()),
+        Err(_) => (1, 0, number.to_string()),
+    }
+}
+
+/// A point-number filter such as `1-50,100,CP1`: inclusive numeric ranges and
+/// single names, comma separated. Alphanumeric names match exactly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NumberFilter {
+    ranges: Vec<(u64, u64)>,
+    names: Vec<String>,
+}
+
+impl NumberFilter {
+    /// Parse a filter; `None` if a part is empty or a range is reversed or
+    /// not numeric.
+    pub fn parse(spec: &str) -> Option<Self> {
+        let mut f = NumberFilter { ranges: Vec::new(), names: Vec::new() };
+        for part in spec.split(',').map(str::trim) {
+            if part.is_empty() {
+                return None;
+            }
+            if let Some((a, b)) = part.split_once('-') {
+                let (a, b) = (a.trim().parse::<u64>().ok()?, b.trim().parse::<u64>().ok()?);
+                if a > b {
+                    return None;
+                }
+                f.ranges.push((a, b));
+            } else if let Ok(n) = part.parse::<u64>() {
+                f.ranges.push((n, n));
+            } else {
+                f.names.push(part.to_string());
+            }
+        }
+        Some(f)
+    }
+
+    /// Whether point `number` passes the filter.
+    pub fn matches(&self, number: &str) -> bool {
+        let number = number.trim();
+        match number.parse::<u64>() {
+            Ok(n) => self.ranges.iter().any(|&(a, b)| (a..=b).contains(&n)),
+            Err(_) => self.names.iter().any(|name| name == number),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pt(number: &str, n: f64, e: f64, z: f64, d: &str) -> PnezdPoint {
+        PnezdPoint { number: number.into(), northing: n, easting: e, elevation: z, description: d.into() }
+    }
+
+    #[test]
+    fn write_round_trips_through_parse() {
+        let points = vec![
+            pt("1", 5000.0, 1000.0, 100.0, "IP"),
+            pt("2", 5100.25, 1020.5, 101.25, "IRON PIN, FND"),
+            pt("CP1", 4990.1234, 1080.4, 0.0, ""),
+            pt("4", 5050.0, 1100.0, 99.8, "say \"hi\""),
+        ];
+        for (order, fmt) in [(Order::Pnezd, Format::pnezd()), (Order::Penzd, Format::penzd())] {
+            for delim in [',', '\t'] {
+                let text = write(&points, order, delim, 4);
+                let back = parse_with(&text, &fmt);
+                assert_eq!(back.skipped, 0, "{text}");
+                assert_eq!(back.points, points, "{order:?} {delim:?}:\n{text}");
+            }
+        }
+    }
+
+    #[test]
+    fn write_fixes_decimals_and_column_order() {
+        let p = [pt("7", 5000.0, 1000.0, 100.0, "CP")];
+        assert_eq!(write(&p, Order::Pnezd, ',', 3), "7,5000.000,1000.000,100.000,CP\r\n");
+        assert_eq!(write(&p, Order::Penzd, ',', 2), "7,1000.00,5000.00,100.00,CP\r\n");
+    }
+
+    #[test]
+    fn number_filter_ranges_and_names() {
+        let f = NumberFilter::parse("1-50, 100,CP1").unwrap();
+        assert!(f.matches("1") && f.matches("50") && f.matches("100") && f.matches("CP1"));
+        assert!(!f.matches("51") && !f.matches("CP2") && !f.matches("0"));
+        assert!(NumberFilter::parse("5-1").is_none());
+        assert!(NumberFilter::parse("1,,2").is_none());
+        assert!(NumberFilter::parse("a-b").is_none());
+    }
+
+    #[test]
+    fn number_sort_is_numeric_then_names() {
+        let mut v = vec!["10", "CP1", "2", "1", "A"];
+        v.sort_by_key(|n| number_sort_key(n));
+        assert_eq!(v, ["1", "2", "10", "A", "CP1"]);
+    }
 
     #[test]
     fn parses_basic_records_and_skips_junk() {

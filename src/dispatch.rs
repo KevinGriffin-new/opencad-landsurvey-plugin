@@ -95,7 +95,8 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
     match verb {
         "LS_HELLO" => {
             host.push_info(
-                "Land Survey plugin ready. Points: LS_PNEZD, LS_RAW, LS_LIST, LS_AUTOLABEL, LS_POINTLABEL. \
+                "Land Survey plugin ready. Points: LS_PNEZD, LS_PNEZDOUT, LS_POINT, LS_RAW, LS_LIST, \
+                 LS_AUTOLABEL, LS_POINTLABEL. \
                  Field-to-finish: LS_FINISH (lines, symbols), LS_LIBRARY. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
                  Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
@@ -170,6 +171,14 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_LIST" => {
             list_points(host);
+            true
+        }
+        "LS_PNEZDOUT" => {
+            export_pnezd(host, cmd);
+            true
+        }
+        "LS_POINT" => {
+            create_point(host, cmd);
             true
         }
         "LS_FINISH" => {
@@ -305,7 +314,16 @@ fn draw_survey_points(
     // precise marker with the point number hugging it (~half a text-height
     // away). The number — not the marker — is the prominent element. Text
     // height scales to the survey extent so it stays legible at zoom-extents.
-    let h = label_height(points);
+    draw_survey_points_sized(host, points, detail, label_height(points))
+}
+
+/// [`draw_survey_points`] with the label text height `h` given.
+fn draw_survey_points_sized(
+    host: &mut dyn HostApi,
+    points: &[pnezd::PnezdPoint],
+    detail: bool,
+    h: f64,
+) -> (usize, usize) {
     let marker = {
         let header = &mut host.document_mut().header;
         if header.point_display_mode == 0 {
@@ -549,35 +567,188 @@ fn point_label_cmd(host: &mut dyn HostApi, cmd: &str) {
     ));
 }
 
-/// `LS_INVERSE <N1> <E1> <N2> <E2>` — distance + bearing between two coords.
-fn inverse(host: &mut dyn HostApi, cmd: &str) {
-    const USAGE: &str = "Usage: LS_INVERSE <N1> <E1> <N2> <E2> [draw] [anim]";
-    let toks: Vec<&str> = cmd.split_whitespace().skip(1).collect();
-    if toks.is_empty() {
-        host.push_info(USAGE);
-        return;
-    }
-    // Strict: exactly 4 finite coordinates plus known keywords — a lenient
-    // parse would let a typo shift the coordinates one slot left.
-    let mut nums: Vec<f64> = Vec::with_capacity(4);
-    for t in &toks {
-        if t.eq_ignore_ascii_case("draw") || t.eq_ignore_ascii_case("anim") {
-            continue;
+/// The Land Survey points in the drawing (entities tagged `LANDSURVEY_POINT`),
+/// with their handles, in handle order.
+fn survey_points(host: &dyn HostApi) -> Vec<(codec::Handle, pnezd::PnezdPoint)> {
+    let mut points: Vec<(codec::Handle, pnezd::PnezdPoint)> = Vec::new();
+    for e in host.document().entities() {
+        if let (EntityType::Point(p), Some((number, description))) = (e, named_tag(e, XDATA_POINT)) {
+            points.push((
+                e.common().handle,
+                pnezd::PnezdPoint {
+                    number,
+                    northing: p.location.y,
+                    easting: p.location.x,
+                    elevation: p.location.z,
+                    description,
+                },
+            ));
         }
-        match t.parse::<f64>() {
-            Ok(v) if v.is_finite() => nums.push(v),
-            _ => {
-                host.push_error(&format!("LS_INVERSE: \"{t}\" is not a finite number. {USAGE}"));
-                return;
+    }
+    points.sort_by_key(|(h, _)| *h);
+    points
+}
+
+/// Point labels in the drawing: label handle → the number of its point.
+fn label_numbers(host: &dyn HostApi) -> std::collections::HashMap<codec::Handle, String> {
+    host.document()
+        .entities()
+        .filter_map(|e| named_tag(e, XDATA_LABEL).map(|(number, _)| (e.common().handle, number)))
+        .collect()
+}
+
+/// The survey point an entity stands for: the point itself, or the point a
+/// tagged label belongs to (issue #59), so picking or selecting a label works
+/// like picking its point.
+fn resolve_point<'a>(
+    points: &'a [(codec::Handle, pnezd::PnezdPoint)],
+    labels: &std::collections::HashMap<codec::Handle, String>,
+    handle: codec::Handle,
+) -> Option<&'a pnezd::PnezdPoint> {
+    if let Some((_, p)) = points.iter().find(|(h, _)| *h == handle) {
+        return Some(p);
+    }
+    let number = labels.get(&handle)?;
+    point_by_number(points, number)
+}
+
+/// The first point named `number` (exact match after trimming).
+fn point_by_number<'a>(
+    points: &'a [(codec::Handle, pnezd::PnezdPoint)],
+    number: &str,
+) -> Option<&'a pnezd::PnezdPoint> {
+    let number = number.trim();
+    points.iter().map(|(_, p)| p).find(|p| p.number == number)
+}
+
+/// The selected entities as survey points (labels resolved to their points),
+/// in selection order, each point once.
+fn selected_points(host: &dyn HostApi) -> Vec<pnezd::PnezdPoint> {
+    let selection = host.selection();
+    if selection.is_empty() {
+        return Vec::new();
+    }
+    let points = survey_points(host);
+    let labels = label_numbers(host);
+    let mut out: Vec<pnezd::PnezdPoint> = Vec::new();
+    for h in selection {
+        if let Some(p) = resolve_point(&points, &labels, h) {
+            if !out.iter().any(|q| q.number == p.number) {
+                out.push(p.clone());
             }
         }
     }
-    if nums.len() != 4 {
-        host.push_error(&format!(
-            "LS_INVERSE: expected 4 coordinates, got {}. {USAGE}",
-            nums.len()
-        ));
-        return;
+    out
+}
+
+/// One line describing the inverse from point `a` to point `b`, with the
+/// elevation difference.
+fn point_inverse_text(a: &pnezd::PnezdPoint, b: &pnezd::PnezdPoint, inv: &cogo::Inverse) -> String {
+    format!(
+        "{} \u{2192} {}: distance {:.4}, azimuth {:.4}\u{b0}, bearing {}, \u{394}Z {:+.4}",
+        a.number,
+        b.number,
+        inv.distance,
+        inv.azimuth_deg,
+        cogo::azimuth_to_bearing(inv.azimuth_deg),
+        b.elevation - a.elevation
+    )
+}
+
+/// `LS_INVERSE` — distance and bearing between two points:
+/// - `<P1> <P2>` — two point numbers;
+/// - `<N1> <E1> <N2> <E2>` — two coordinate pairs;
+/// - no arguments with two points (or their labels) selected — those two;
+/// - no arguments and nothing selected — pick points in the drawing, each
+///   inverse chained from the last pick, Enter to finish (issue #58).
+///
+/// `draw` draws the line with bearing/distance labels; `anim` writes an
+/// animated-SVG explainer.
+fn inverse(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_INVERSE <P1> <P2> | <N1> <E1> <N2> <E2> [draw] [anim]  \
+                         (no arguments: inverse the two selected points, or pick points)";
+    let toks: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    let draw = toks.iter().any(|t| t.eq_ignore_ascii_case("draw"));
+    let anim = toks.iter().any(|t| t.eq_ignore_ascii_case("anim"));
+    let args: Vec<&str> = toks
+        .iter()
+        .copied()
+        .filter(|t| !t.eq_ignore_ascii_case("draw") && !t.eq_ignore_ascii_case("anim"))
+        .collect();
+
+    match args.len() {
+        0 => inverse_selected_or_pick(host, draw, anim, USAGE),
+        2 => {
+            let points = survey_points(host);
+            let mut found = Vec::with_capacity(2);
+            for number in &args {
+                match point_by_number(&points, number) {
+                    Some(p) => found.push(p.clone()),
+                    None => {
+                        host.push_error(&format!(
+                            "LS_INVERSE: no Land Survey point numbered \"{number}\" in the drawing. {USAGE}"
+                        ));
+                        return;
+                    }
+                }
+            }
+            inverse_points(host, &found[0], &found[1], draw, anim);
+        }
+        4 => inverse_coords(host, &args, draw, anim, USAGE),
+        n => host.push_error(&format!(
+            "LS_INVERSE: expected 2 point numbers or 4 coordinates, got {n} value(s). {USAGE}"
+        )),
+    }
+}
+
+/// `LS_INVERSE` with no point arguments: the two selected points, else an
+/// interactive pick.
+fn inverse_selected_or_pick(host: &mut dyn HostApi, draw: bool, anim: bool, usage: &str) {
+    let selected = selected_points(host);
+    match selected.len() {
+        2 => inverse_points(host, &selected[0], &selected[1], draw, anim),
+        0 => {
+            let points = survey_points(host);
+            if points.is_empty() {
+                host.push_info(&format!("LS_INVERSE: no Land Survey points in the drawing to pick. {usage}"));
+                return;
+            }
+            let labels = label_numbers(host);
+            let tolerance = label_height(&points.iter().map(|(_, p)| p.clone()).collect::<Vec<_>>());
+            host.start_interactive(Box::new(InversePick::new(points, labels, tolerance, draw)));
+        }
+        n => host.push_error(&format!(
+            "LS_INVERSE: select exactly two Land Survey points (or their labels); {n} selected. {usage}"
+        )),
+    }
+}
+
+/// Inverse between two survey points, reported with their numbers.
+fn inverse_points(host: &mut dyn HostApi, a: &pnezd::PnezdPoint, b: &pnezd::PnezdPoint, draw: bool, anim: bool) {
+    let inv = cogo::inverse(a.northing, a.easting, b.northing, b.easting);
+    host.push_output(&format!("LS_INVERSE: {}", point_inverse_text(a, b, &inv)));
+    if draw {
+        draw_inverse_line(host, a.easting, a.northing, b.easting, b.northing, &inv);
+    }
+    if anim {
+        let svg = viz::inverse_anim_svg(a.northing, a.easting, b.northing, b.easting);
+        write_anim_file(host, "inverse", &svg);
+    }
+}
+
+/// `LS_INVERSE <N1> <E1> <N2> <E2>` — inverse between two typed coordinates.
+fn inverse_coords(host: &mut dyn HostApi, args: &[&str], draw: bool, anim: bool, usage: &str) {
+    // Strict: exactly 4 finite coordinates — a lenient parse would let a typo
+    // shift the coordinates one slot left.
+    let mut nums: Vec<f64> = Vec::with_capacity(4);
+    for t in args {
+        match t.parse::<f64>() {
+            Ok(v) if v.is_finite() => nums.push(v),
+            _ => {
+                host.push_error(&format!("LS_INVERSE: \"{t}\" is not a finite number. {usage}"));
+                return;
+            }
+        }
     }
     let inv = cogo::inverse(nums[0], nums[1], nums[2], nums[3]);
     host.push_output(&format!(
@@ -588,14 +759,110 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
     ));
     // `LS_INVERSE <N1> <E1> <N2> <E2> draw` → draw the line with bearing +
     // distance labels positioned by the MSannotate convention.
-    if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("draw")) {
+    if draw {
         // world mapping X = Easting, Y = Northing.
         draw_inverse_line(host, nums[1], nums[0], nums[3], nums[2], &inv);
     }
     // `LS_INVERSE <N1> <E1> <N2> <E2> anim` → export an animated-SVG explainer.
-    if cmd.split_whitespace().any(|t| t.eq_ignore_ascii_case("anim")) {
+    if anim {
         let svg = viz::inverse_anim_svg(nums[0], nums[1], nums[2], nums[3]);
         write_anim_file(host, "inverse", &svg);
+    }
+}
+
+/// Interactive `LS_INVERSE`: pick a point (its × or its label), then the
+/// next; each pick is inversed from the one before it, so picking around a
+/// lot walks its courses. The result shows in the prompt, since an
+/// interactive command has no other way to write to the command line. Enter
+/// finishes. With `draw`, each course is drawn as it is picked.
+///
+/// The points are snapshotted when the command starts: the callbacks get no
+/// host access to read the drawing.
+struct InversePick {
+    points: Vec<(codec::Handle, pnezd::PnezdPoint)>,
+    labels: std::collections::HashMap<codec::Handle, String>,
+    /// A free click within this distance of a point picks that point.
+    tolerance: f64,
+    draw: bool,
+    previous: Option<pnezd::PnezdPoint>,
+    /// The last inverse, or why the last pick was refused.
+    message: Option<String>,
+}
+
+impl InversePick {
+    fn new(
+        points: Vec<(codec::Handle, pnezd::PnezdPoint)>,
+        labels: std::collections::HashMap<codec::Handle, String>,
+        tolerance: f64,
+        draw: bool,
+    ) -> Self {
+        InversePick { points, labels, tolerance, draw, previous: None, message: None }
+    }
+
+    /// The point nearest a clicked location, if within the tolerance.
+    fn nearest(&self, pt: [f64; 3]) -> Option<pnezd::PnezdPoint> {
+        self.points
+            .iter()
+            .map(|(_, p)| (p, (p.easting - pt[0]).hypot(p.northing - pt[1])))
+            .filter(|(_, d)| *d <= self.tolerance)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(p, _)| p.clone())
+    }
+
+    /// Take a picked point: remember the first, inverse the rest from the one
+    /// before.
+    fn take(&mut self, picked: Option<pnezd::PnezdPoint>) -> ocs_plugin_api::host::CommandStep {
+        use ocs_plugin_api::host::CommandStep;
+        let Some(p) = picked else {
+            self.message = Some("not a Land Survey point or label".to_string());
+            return CommandStep::NeedPoint;
+        };
+        let Some(prev) = self.previous.replace(p.clone()) else {
+            self.message = None;
+            return CommandStep::NeedPoint;
+        };
+        if prev.number == p.number {
+            self.message = Some(format!("{} picked twice", p.number));
+            return CommandStep::NeedPoint;
+        }
+        let inv = cogo::inverse(prev.northing, prev.easting, p.northing, p.easting);
+        self.message = Some(point_inverse_text(&prev, &p, &inv));
+        if self.draw {
+            CommandStep::CommitMany(inverse_line_entities(prev.easting, prev.northing, p.easting, p.northing, &inv))
+        } else {
+            CommandStep::NeedPoint
+        }
+    }
+}
+
+impl ocs_plugin_api::host::InteractiveCommand for InversePick {
+    fn prompt(&self) -> String {
+        let next = match &self.previous {
+            None => "LS_INVERSE: pick the first point (or its label)".to_string(),
+            Some(p) => format!("LS_INVERSE: from {}, pick the next point, Enter to finish", p.number),
+        };
+        match &self.message {
+            Some(m) => format!("{m}  |  {next}"),
+            None => next,
+        }
+    }
+
+    fn on_point(&mut self, pt: [f64; 3]) -> ocs_plugin_api::host::CommandStep {
+        let picked = self.nearest(pt);
+        self.take(picked)
+    }
+
+    fn on_enter(&mut self) -> ocs_plugin_api::host::CommandStep {
+        ocs_plugin_api::host::CommandStep::Done
+    }
+
+    fn needs_object_pick(&self) -> bool {
+        true
+    }
+
+    fn on_object_pick(&mut self, handle: codec::Handle, pt: [f64; 3]) -> ocs_plugin_api::host::CommandStep {
+        let picked = resolve_point(&self.points, &self.labels, handle).cloned().or_else(|| self.nearest(pt));
+        self.take(picked)
     }
 }
 
@@ -607,17 +874,23 @@ fn inverse(host: &mut dyn HostApi, cmd: &str) {
 /// there is no parcel, so sides are simply left/right (the bearing-outside /
 /// distance-inside refinement needs a parcel centroid).
 fn draw_inverse_line(host: &mut dyn HostApi, e1: f64, n1: f64, e2: f64, n2: f64, inv: &cogo::Inverse) {
+    host.push_undo("LS_INVERSE draw");
+    for ent in inverse_line_entities(e1, n1, e2, n2, inv) {
+        host.add_entity(ent);
+    }
+    host.bump_geometry();
+    host.set_dirty();
+}
+
+/// The line and its bearing/distance labels for [`draw_inverse_line`], with
+/// their layers set, ready to add (or to commit from an interactive command).
+fn inverse_line_entities(e1: f64, n1: f64, e2: f64, n2: f64, inv: &cogo::Inverse) -> Vec<EntityType> {
     const LAYER: &str = "LS-INVERSE";
 
-    host.push_undo("LS_INVERSE draw");
-    add_on_layer(
-        host,
-        EntityType::Line(Line::from_points(
-            Vector3::new(e1, n1, 0.0),
-            Vector3::new(e2, n2, 0.0),
-        )),
-        LAYER,
-    );
+    let mut out = Vec::with_capacity(3);
+    let mut line = EntityType::Line(Line::from_points(Vector3::new(e1, n1, 0.0), Vector3::new(e2, n2, 0.0)));
+    line.common_mut().layer = LAYER.to_string();
+    out.push(line);
 
     let (dx, dy) = (e2 - e1, n2 - n1);
     let (mx, my) = ((e1 + e2) / 2.0, (n1 + n2) / 2.0);
@@ -685,11 +958,10 @@ fn draw_inverse_line(host: &mut dyn HostApi, e1: f64, n1: f64, e2: f64, n2: f64,
                 .with_rotation(rot),
         );
         ent.common_mut().color = Color::from_index(color);
-        add_on_layer(host, ent, layer);
+        ent.common_mut().layer = layer.to_string();
+        out.push(ent);
     }
-
-    host.bump_geometry();
-    host.set_dirty();
+    out
 }
 
 /// `LS_LABELSTYLE` — show or change the MicroSurvey label styles used for
@@ -2339,6 +2611,206 @@ fn list_points(host: &mut dyn HostApi) {
     }
 }
 
+/// `LS_PNEZDOUT <file> [pnezd|penzd] [selected] [range=<spec>] [tab] [dp=<n>]`
+/// — write the drawing's Land Survey points to a point file for the data
+/// collector (issue #60), in point-number order. `selected` writes the
+/// selected points (a selected label stands for its point); `range=1-50,100,CP1`
+/// filters by number; `tab` separates fields with tabs instead of commas;
+/// `dp=` sets the decimal places (default 4). An existing file is replaced.
+fn export_pnezd(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_PNEZDOUT <file> [pnezd|penzd] [selected] [range=1-50,100] [tab] [dp=<n>]";
+    let rest = first_arg(cmd);
+    if rest.is_empty() {
+        host.push_info(USAGE);
+        return;
+    }
+
+    // Peel trailing options off in any order; the remainder is the path, which
+    // may contain spaces.
+    let mut path = rest;
+    let mut order = pnezd::Order::Pnezd;
+    let mut selected = false;
+    let mut delimiter = ',';
+    let mut decimals = 4usize;
+    let mut filter: Option<pnezd::NumberFilter> = None;
+    loop {
+        let trimmed = path.trim_end();
+        let Some(idx) = trimmed.rfind(char::is_whitespace) else {
+            break;
+        };
+        let word = trimmed[idx + 1..].to_ascii_lowercase();
+        match word.as_str() {
+            "pnezd" => order = pnezd::Order::Pnezd,
+            "penzd" => order = pnezd::Order::Penzd,
+            "selected" => selected = true,
+            "tab" => delimiter = '\t',
+            "comma" => delimiter = ',',
+            w if w.starts_with("range=") => match pnezd::NumberFilter::parse(&trimmed[idx + 1 + 6..]) {
+                Some(f) => filter = Some(f),
+                None => {
+                    host.push_error(&format!("LS_PNEZDOUT: cannot read \"{}\" as a point range. {USAGE}", &trimmed[idx + 1..]));
+                    return;
+                }
+            },
+            w if w.starts_with("dp=") => match w[3..].parse::<usize>() {
+                Ok(n) if n <= 8 => decimals = n,
+                _ => {
+                    host.push_error(&format!("LS_PNEZDOUT: dp must be 0 to 8. {USAGE}"));
+                    return;
+                }
+            },
+            _ => break,
+        }
+        path = &trimmed[..idx];
+    }
+    let path = path.trim().trim_matches('"');
+    if path.is_empty() {
+        host.push_info(USAGE);
+        return;
+    }
+
+    let mut points: Vec<pnezd::PnezdPoint> = if selected {
+        let sel = selected_points(host);
+        if sel.is_empty() {
+            host.push_error("LS_PNEZDOUT: no Land Survey points (or their labels) are selected.");
+            return;
+        }
+        sel
+    } else {
+        survey_points(host).into_iter().map(|(_, p)| p).collect()
+    };
+    if let Some(f) = &filter {
+        points.retain(|p| f.matches(&p.number));
+    }
+    if points.is_empty() {
+        host.push_error(&format!(
+            "LS_PNEZDOUT: no Land Survey points {}to write.",
+            if filter.is_some() { "in that range " } else { "in the drawing " }
+        ));
+        return;
+    }
+    points.sort_by_key(|p| pnezd::number_sort_key(&p.number));
+
+    let text = pnezd::write(&points, order, delimiter, decimals);
+    if let Err(e) = fs::write(path, text) {
+        host.push_error(&format!("LS_PNEZDOUT: cannot write \"{path}\": {e}"));
+        return;
+    }
+    host.push_output(&format!(
+        "LS_PNEZDOUT: wrote {} point(s) to \"{path}\" ({}, {}-delimited, {decimals} decimal places).",
+        points.len(),
+        match order {
+            pnezd::Order::Pnezd => "PNEZD",
+            pnezd::Order::Penzd => "PENZD",
+        },
+        if delimiter == '\t' { "tab" } else { "comma" },
+    ));
+}
+
+/// `LS_POINT <N> <E> [Z] [description] [number=<n>] [overwrite]` — create a
+/// Land Survey point from typed coordinates (issue #61), e.g. a search point
+/// to send to the data collector with `LS_PNEZDOUT`. It is tagged, layered by
+/// code and labelled exactly like an imported point. The number defaults to
+/// the next free one; an existing number is refused unless `overwrite`, which
+/// replaces that point and its labels. A description that begins with a
+/// number needs the elevation typed before it.
+fn create_point(host: &mut dyn HostApi, cmd: &str) {
+    const USAGE: &str = "Usage: LS_POINT <N> <E> [Z] [description] [number=<n>] [overwrite]";
+    let mut number: Option<String> = None;
+    let mut overwrite = false;
+    let mut words: Vec<&str> = Vec::new();
+    for t in cmd.split_whitespace().skip(1) {
+        let lower = t.to_ascii_lowercase();
+        if let Some(n) = lower.strip_prefix("number=") {
+            if n.is_empty() {
+                host.push_error(&format!("LS_POINT: number= needs a point number. {USAGE}"));
+                return;
+            }
+            number = Some(t[7..].to_string());
+        } else if lower == "overwrite" {
+            overwrite = true;
+        } else {
+            words.push(t);
+        }
+    }
+    let coords: Vec<f64> = words
+        .iter()
+        .take(3)
+        .map_while(|t| t.parse::<f64>().ok().filter(|v| v.is_finite()))
+        .collect();
+    if coords.len() < 2 {
+        host.push_info(USAGE);
+        return;
+    }
+    let description = words[coords.len()..].join(" ");
+
+    let points = survey_points(host);
+    let number = number.unwrap_or_else(|| {
+        let max = points.iter().filter_map(|(_, p)| p.number.trim().parse::<u64>().ok()).max();
+        (max.unwrap_or(0) + 1).to_string()
+    });
+    let existing: Vec<codec::Handle> = points.iter().filter(|(_, p)| p.number == number).map(|(h, _)| *h).collect();
+    if !existing.is_empty() && !overwrite {
+        host.push_error(&format!(
+            "LS_POINT: point {number} already exists; add 'overwrite' to replace it, or give another number=."
+        ));
+        return;
+    }
+
+    let point = pnezd::PnezdPoint {
+        number: number.clone(),
+        northing: coords[0],
+        easting: coords[1],
+        elevation: coords.get(2).copied().unwrap_or(0.0),
+        description,
+    };
+    // Size the labels like the ones already drawn, so a new point matches.
+    let height = existing_label_height(host).unwrap_or_else(|| {
+        let mut all: Vec<pnezd::PnezdPoint> = points.iter().map(|(_, p)| p.clone()).collect();
+        all.push(point.clone());
+        label_height(&all)
+    });
+
+    host.push_undo("LS_POINT");
+    let replaced = if existing.is_empty() {
+        0
+    } else {
+        let labels: Vec<codec::Handle> = label_numbers(host)
+            .into_iter()
+            .filter(|(_, n)| *n == number)
+            .map(|(h, _)| h)
+            .collect();
+        existing.iter().chain(&labels).filter(|&&h| host.remove_entity(h)).count();
+        existing.len()
+    };
+    draw_survey_points_sized(host, std::slice::from_ref(&point), false, height);
+    host.bump_geometry();
+    host.set_dirty();
+    host.push_output(&format!(
+        "LS_POINT: {} point {number}: N {:.3}  E {:.3}  Z {:.3}{}.",
+        if replaced > 0 { "replaced" } else { "created" },
+        point.northing,
+        point.easting,
+        point.elevation,
+        if point.description.is_empty() { String::new() } else { format!("  {}", point.description) },
+    ));
+}
+
+/// The text height of the point-number labels already in the drawing, if any.
+fn existing_label_height(host: &dyn HostApi) -> Option<f64> {
+    host.document().entities().find_map(|e| match e {
+        EntityType::Text(t) => {
+            let rec = e.common().extended_data.get_record(XDATA_LABEL)?;
+            let field = rec.values.iter().filter_map(|v| match v {
+                XDataValue::String(s) => Some(s.as_str()),
+                _ => None,
+            }).nth(3)?;
+            (field == "number").then_some(t.height)
+        }
+        _ => None,
+    })
+}
+
 /// `LS_FINISH [lines] [symbols] [mode=strings|xyz] [order=shot|number]
 /// [scale=<n>] [preview]` — field-to-finish: connect the Land Survey points in
 /// the drawing into figures from their coded descriptions, and place plan
@@ -3018,6 +3490,10 @@ mod tests {
         scripted: bool,
         /// `BlockCreate` requests accepted.
         blocks_created: Vec<String>,
+        /// What `selection()` returns.
+        selected: Vec<codec::Handle>,
+        /// The interactive command last started, for the tests to drive.
+        interactive: Option<Box<dyn ocs_plugin_api::host::InteractiveCommand>>,
     }
 
     impl TestHost {
@@ -3030,6 +3506,8 @@ mod tests {
                 bulk_limit: None,
                 scripted: false,
                 blocks_created: Vec::new(),
+                selected: Vec::new(),
+                interactive: None,
             }
         }
     }
@@ -3170,9 +3648,12 @@ mod tests {
         }
         fn start_interactive(
             &mut self,
-            _command: Box<dyn ocs_plugin_api::host::InteractiveCommand>,
+            command: Box<dyn ocs_plugin_api::host::InteractiveCommand>,
         ) {
-            unimplemented!("not exercised by these tests")
+            self.interactive = Some(command);
+        }
+        fn selection(&self) -> Vec<codec::Handle> {
+            self.selected.clone()
         }
         fn plugin_state_any(
             &self,
@@ -4670,4 +5151,231 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         assert_eq!(surf.nodes, sample_surface().nodes);
         assert_eq!(surf.triangles, sample_surface().triangles);
     }
+
+    // ── #58 / #60 / #61: inverse by point, PNEZD export, point creation ──
+
+    /// A drawing holding the five #38 points, imported with LS_PNEZD (labels
+    /// tagged), and the temp folder the test may write in.
+    fn five_point_drawing(tag: &str) -> (TestHost, std::path::PathBuf) {
+        crate::state::state().label_fields = crate::state::LabelFields::default();
+        crate::state::state().suppress_labels = false;
+        let dir = std::env::temp_dir().join(format!("ls_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("pts.csv");
+        std::fs::write(
+            &src,
+            "1,5000.000,1000.000,100.00,IP\n2,5000.000,1036.000,101.25,IP\n3,5050.000,1100.000,99.80,TREE\n\
+             4,4990.100,1080.400,100.40,CP\n5,5025.000,1050.000,100.10,CP\n",
+        )
+        .unwrap();
+        let mut host = TestHost::new();
+        import_pnezd(&mut host, &format!("LS_PNEZD {}", src.display()));
+        (host, dir)
+    }
+
+    fn point_handle(host: &TestHost, number: &str) -> codec::Handle {
+        survey_points(host).into_iter().find(|(_, p)| p.number == number).unwrap().0
+    }
+
+    fn label_handle(host: &TestHost, number: &str) -> codec::Handle {
+        *label_numbers(host).iter().find(|(_, n)| n.as_str() == number).unwrap().0
+    }
+
+    #[test]
+    fn inverse_by_point_numbers() {
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("inv_num");
+        host.log.clear();
+        inverse(&mut host, "LS_INVERSE 1 2");
+        let line = host.log.last().unwrap();
+        assert!(line.starts_with("LS_INVERSE: 1 \u{2192} 2: distance 36.0000, azimuth 90.0000"), "{line}");
+        assert!(line.ends_with("\u{394}Z +1.2500"), "{line}");
+
+        inverse(&mut host, "LS_INVERSE 1 99");
+        assert!(host.log.last().unwrap().starts_with("ERROR: LS_INVERSE: no Land Survey point numbered \"99\""));
+        inverse(&mut host, "LS_INVERSE 1 2 3");
+        assert!(host.log.last().unwrap().contains("expected 2 point numbers or 4 coordinates, got 3"));
+    }
+
+    #[test]
+    fn inverse_by_point_numbers_draws() {
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("inv_draw");
+        inverse(&mut host, "LS_INVERSE 1 2 draw");
+        let lines = host.doc.entities().filter(|e| e.common().layer == "LS-INVERSE").count();
+        assert_eq!(lines, 1, "one inverse line");
+    }
+
+    #[test]
+    fn inverse_of_two_selected_points_accepts_labels() {
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("inv_sel");
+        // The point 1 marker and point 2's label, as a user might pick them.
+        host.selected = vec![point_handle(&host, "1"), label_handle(&host, "2")];
+        inverse(&mut host, "LS_INVERSE");
+        assert!(host.log.last().unwrap().starts_with("LS_INVERSE: 1 \u{2192} 2: distance 36.0000"));
+        assert!(host.interactive.is_none());
+
+        // A point and its own label are one point, not two.
+        host.selected = vec![point_handle(&host, "1"), label_handle(&host, "1")];
+        inverse(&mut host, "LS_INVERSE");
+        assert!(host.log.last().unwrap().contains("select exactly two Land Survey points"), "{:?}", host.log.last());
+    }
+
+    #[test]
+    fn inverse_pick_chains_from_the_last_point() {
+        use ocs_plugin_api::host::CommandStep;
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("inv_pick");
+        let (label1, h2) = (label_handle(&host, "1"), point_handle(&host, "2"));
+        inverse(&mut host, "LS_INVERSE");
+        let mut cmd = host.interactive.take().expect("no selection starts a pick");
+        assert!(cmd.needs_object_pick());
+        assert!(cmd.prompt().contains("pick the first point"));
+
+        // First pick by label, then by the point itself.
+        assert!(matches!(cmd.on_object_pick(label1, [0.0; 3]), CommandStep::NeedPoint));
+        assert!(cmd.prompt().contains("from 1,"));
+        assert!(matches!(cmd.on_object_pick(h2, [1036.0, 5000.0, 0.0]), CommandStep::NeedPoint));
+        assert!(cmd.prompt().starts_with("1 \u{2192} 2: distance 36.0000"), "{}", cmd.prompt());
+
+        // A free click near point 5 picks it, chained from 2.
+        assert!(matches!(cmd.on_point([1050.2, 5025.1, 0.0]), CommandStep::NeedPoint));
+        assert!(cmd.prompt().starts_with("2 \u{2192} 5:"), "{}", cmd.prompt());
+
+        // A click far from any point is refused without losing the chain.
+        cmd.on_point([0.0, 0.0, 0.0]);
+        assert!(cmd.prompt().starts_with("not a Land Survey point"), "{}", cmd.prompt());
+        assert!(cmd.prompt().contains("from 5,"));
+        assert!(matches!(cmd.on_enter(), CommandStep::Done));
+    }
+
+    #[test]
+    fn inverse_pick_with_draw_commits_each_course() {
+        use ocs_plugin_api::host::CommandStep;
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("inv_pickdraw");
+        let (h1, h2) = (point_handle(&host, "1"), point_handle(&host, "2"));
+        inverse(&mut host, "LS_INVERSE draw");
+        let mut cmd = host.interactive.take().unwrap();
+        cmd.on_object_pick(h1, [0.0; 3]);
+        match cmd.on_object_pick(h2, [0.0; 3]) {
+            CommandStep::CommitMany(es) => {
+                assert_eq!(es.len(), 3, "line + bearing + distance");
+                assert!(es.iter().all(|e| !e.common().layer.is_empty()));
+            }
+            _ => panic!("draw commits the course"),
+        }
+    }
+
+    #[test]
+    fn coordinate_inverse_is_unchanged() {
+        let mut host = TestHost::new();
+        inverse(&mut host, "LS_INVERSE 1000 2000 1000 2036");
+        assert!(host.log[0].starts_with("LS_INVERSE: distance 36.0000, azimuth 90.0000"), "{:?}", host.log);
+    }
+
+    #[test]
+    fn pnezd_export_round_trips_the_import() {
+        let _lock = finish_lock();
+        let (mut host, dir) = five_point_drawing("pnezdout");
+        let out = dir.join("out file.csv");
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} dp=3", out.display()));
+        assert!(host.log.last().unwrap().starts_with("LS_PNEZDOUT: wrote 5 point(s)"), "{:?}", host.log.last());
+        let text = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            text,
+            "1,5000.000,1000.000,100.000,IP\r\n2,5000.000,1036.000,101.250,IP\r\n3,5050.000,1100.000,99.800,TREE\r\n\
+             4,4990.100,1080.400,100.400,CP\r\n5,5025.000,1050.000,100.100,CP\r\n"
+        );
+
+        // Re-import into a fresh drawing: same points.
+        let mut again = TestHost::new();
+        import_pnezd(&mut again, &format!("LS_PNEZD {}", out.display()));
+        let pts = |h: &TestHost| survey_points(h).into_iter().map(|(_, p)| p).collect::<Vec<_>>();
+        assert_eq!(pts(&again), pts(&host));
+    }
+
+    #[test]
+    fn pnezd_export_filters_and_formats() {
+        let _lock = finish_lock();
+        let (mut host, dir) = five_point_drawing("pnezdout_opts");
+        let out = dir.join("search.txt");
+        let read = || std::fs::read_to_string(&out).unwrap();
+
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} range=2-3,5 penzd tab dp=1", out.display()));
+        assert_eq!(read(), "2\t1036.0\t5000.0\t101.2\tIP\r\n3\t1100.0\t5050.0\t99.8\tTREE\r\n5\t1050.0\t5025.0\t100.1\tCP\r\n");
+
+        // Selected points (a label counts as its point), written in number order.
+        host.selected = vec![label_handle(&host, "4"), point_handle(&host, "1")];
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} selected dp=0", out.display()));
+        assert_eq!(read(), "1,5000,1000,100,IP\r\n4,4990,1080,100,CP\r\n");
+
+        host.selected.clear();
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} selected", out.display()));
+        assert!(host.log.last().unwrap().contains("no Land Survey points (or their labels) are selected"));
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} range=50-60", out.display()));
+        assert!(host.log.last().unwrap().contains("no Land Survey points in that range"));
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} range=9-1", out.display()));
+        assert!(host.log.last().unwrap().contains("cannot read \"range=9-1\""));
+        export_pnezd(&mut host, "LS_PNEZDOUT");
+        assert!(host.log.last().unwrap().starts_with("Usage: LS_PNEZDOUT"));
+    }
+
+    #[test]
+    fn create_point_numbers_tags_and_labels_like_an_import() {
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("lspoint");
+        let label_h = existing_label_height(&host).unwrap();
+
+        create_point(&mut host, "LS_POINT 5010.5 1020.25 99.5 SRCH IP 2");
+        assert!(host.log.last().unwrap().starts_with("LS_POINT: created point 6: N 5010.500  E 1020.250  Z 99.500  SRCH IP 2"),
+            "{:?}", host.log.last());
+        let (h6, p6) = survey_points(&host).into_iter().find(|(_, p)| p.number == "6").unwrap();
+        assert_eq!(p6.description, "SRCH IP 2");
+        assert_eq!(host.doc.get_entity(h6).unwrap().common().layer, "LS-PT-SRCH");
+        // Its number label is tagged and sized like the imported ones.
+        let lh = label_handle(&host, "6");
+        match host.doc.get_entity(lh).unwrap() {
+            EntityType::Text(t) => assert!((t.height - label_h).abs() < 1e-9),
+            _ => panic!("label is text"),
+        }
+
+        // Two coordinates only: elevation 0, next number 7.
+        create_point(&mut host, "LS_POINT 5000 1000");
+        assert!(host.log.last().unwrap().starts_with("LS_POINT: created point 7: N 5000.000  E 1000.000  Z 0.000."));
+    }
+
+    #[test]
+    fn create_point_refuses_duplicates_unless_overwrite() {
+        let _lock = finish_lock();
+        let (mut host, _) = five_point_drawing("lspoint_dup");
+        create_point(&mut host, "LS_POINT 5000 1000 number=3");
+        assert!(host.log.last().unwrap().contains("point 3 already exists"));
+
+        create_point(&mut host, "LS_POINT 5001 1001 50 MOVED number=3 overwrite");
+        assert!(host.log.last().unwrap().starts_with("LS_POINT: replaced point 3"), "{:?}", host.log.last());
+        let threes: Vec<_> = survey_points(&host).into_iter().filter(|(_, p)| p.number == "3").collect();
+        assert_eq!(threes.len(), 1);
+        assert_eq!(threes[0].1.description, "MOVED");
+        assert_eq!(label_numbers(&host).values().filter(|n| n.as_str() == "3").count(), 1, "old label gone");
+
+        create_point(&mut host, "LS_POINT 5000");
+        assert!(host.log.last().unwrap().starts_with("Usage: LS_POINT"));
+        create_point(&mut host, "LS_POINT 5000 1000 number=");
+        assert!(host.log.last().unwrap().contains("number= needs a point number"));
+    }
+
+    #[test]
+    fn created_point_can_be_inversed_and_exported() {
+        let _lock = finish_lock();
+        let (mut host, dir) = five_point_drawing("lspoint_flow");
+        create_point(&mut host, "LS_POINT 5000 1072 100 SRCH number=101");
+        inverse(&mut host, "LS_INVERSE 2 101");
+        assert!(host.log.last().unwrap().starts_with("LS_INVERSE: 2 \u{2192} 101: distance 36.0000"));
+        let out = dir.join("to-collector.csv");
+        export_pnezd(&mut host, &format!("LS_PNEZDOUT {} range=101 dp=3", out.display()));
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "101,5000.000,1072.000,100.000,SRCH\r\n");
+    }
 }
+
