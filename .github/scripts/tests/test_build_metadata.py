@@ -19,17 +19,19 @@ def test_2026_36_dependency_override():
     assert plan["rev"] == "c91a1c1de89a0fbc006dc360ddb0251ac8c207d1"
 
 
-def test_2026_41_renamed_codec_and_api():
-    fixture = Path(__file__).parent / "fixtures" / "host" / "v2026.41"
+def test_2026_42_renamed_codec_and_api():
+    # v2026.42 renamed the codec package back to `acadrust` (same opencadcodec
+    # repo) and raised the API window to [3, 10]; the shipped manifest tracks it.
+    fixture = Path(__file__).parent / "fixtures" / "host" / "v2026.42"
     read = lambda name: (fixture / name).read_text(encoding="utf-8")
     plan = gates.host_acadrust_plan(read("ocs_plugin_api-Cargo.toml"), read("Cargo.toml"), read("Cargo.lock"))
-    assert (plan["package"], plan["rev"]) == ("opencadcodec", "8189f83")
-    assert plan["locked_rev"] == "8189f833574c544fc57a1d773591014c3a5907c9"
-    result = gates.gate_api_version(read("manifest.rs"), (ROOT / "plugin.toml").read_text(), "v2026.41")
-    assert result["target"] == 7
+    assert (plan["package"], plan["rev"]) == ("acadrust", "5d4f11a")
+    assert plan["locked_rev"] == "5d4f11ae38758caec540bc9819ff2c4120eeadb4"
+    result = gates.gate_api_version(read("manifest.rs"), (ROOT / "plugin.toml").read_text(), "v2026.42")
+    assert result["target"] == 10
     report = gates.gate_acadrust(read("Cargo.lock"), (ROOT / "Cargo.toml").read_text(),
-                                (ROOT / "Cargo.lock").read_text(), "v2026.41")
-    assert report["host_version"] == "0.6.0"
+                                (ROOT / "Cargo.lock").read_text(), "v2026.42")
+    assert report["host_version"] == "0.6.4"
 
 
 def test_generated_manifest_uses_resolved_source():
