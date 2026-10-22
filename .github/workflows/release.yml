@@ -4,6 +4,18 @@ name: release
 # (plus plugin.toml) to a GitHub Release. Open CAD Studio's Plugin Manager reads
 # the release assets, picks the one matching the user's OS/arch, and installs it.
 #
+# Alongside those, the publish job attaches a per-platform
+# `opencad.landsurvey-<os>-<arch>.tar.gz` (the `opencad.landsurvey/` folder: the
+# signed lib + plugin.toml) and a `.sha256` for each, plus a combined
+# `SHA256SUMS`. These are additive and invisible to the Plugin Manager (its
+# asset match is by `<os>-<arch>.<ext>`); they exist so an external packager —
+# a Homebrew cask/tap, a distro package — or a human can drop the plugin in with
+#   tar -C "<plugins_dir>" -xzf opencad.landsurvey-<os>-<arch>.tar.gz
+# and so a tap bumper has the exact `sha256` a cask needs. The plugins dir is
+# per-user (OpenCADStudio src/plugin/external.rs::plugins_dir):
+# macOS ~/Library/Application Support/OpenCADStudio/plugins, Linux
+# ~/.config/OpenCADStudio/plugins, Windows %APPDATA%\OpenCADStudio\plugins.
+#
 # Two entry points:
 #
 #   push (v* tag)  — a human tagged by hand.
@@ -249,6 +261,45 @@ jobs:
           mkdir dist
           cp artifacts/release-*/opencad.landsurvey-* dist/
           cp artifacts/release-ubuntu-latest/plugin.toml dist/
+
+      - name: Package per-platform tarballs and checksums (Homebrew / manual installs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          # Each tarball expands straight into the host's plugins directory,
+          #   tar -C "<plugins_dir>" -xzf opencad.landsurvey-<os>-<arch>.tar.gz
+          # landing <plugins_dir>/opencad.landsurvey/{<lib>, plugin.toml} — exactly
+          # the layout OpenCADStudio's discover() loads. The bare lib + plugin.toml
+          # assets are untouched (the Plugin Manager still uses them); these are
+          # additive, for packagers and hand installs. The .sha256 beside each
+          # tarball is the value a Homebrew cask's `sha256` field takes.
+          #
+          # macOS carries the already-signed, notarized dylib from the build job;
+          # `cp` preserves the signature, and a bare dylib is verified online
+          # (it cannot be stapled), so the tarball needs no extra signing.
+          #
+          # tar flags are deterministic (sorted names, zeroed mtime/owner) so the
+          # wrapper adds no gratuitous churn to the checksum; the signed dylib's
+          # own bytes still vary per signing, which is inherent, not our doing.
+          shopt -s nullglob
+          for lib in opencad.landsurvey-*.so opencad.landsurvey-*.dll opencad.landsurvey-*.dylib; do
+            base="${lib%.*}"   # opencad.landsurvey-<os>-<arch>
+            ext="${lib##*.}"   # so | dll | dylib
+            rm -rf opencad.landsurvey
+            mkdir opencad.landsurvey
+            cp "$lib" "opencad.landsurvey/opencad.landsurvey.$ext"
+            cp plugin.toml opencad.landsurvey/plugin.toml
+            tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner \
+                -czf "$base.tar.gz" opencad.landsurvey
+            rm -rf opencad.landsurvey
+            sha256sum "$base.tar.gz" | cut -d' ' -f1 > "$base.tar.gz.sha256"
+            echo "packaged $base.tar.gz  $(cat "$base.tar.gz.sha256")"
+          done
+          # One manifest a tap bumper can read in a single fetch.
+          sha256sum opencad.landsurvey-*.tar.gz > SHA256SUMS
+          echo "--- dist now carries ---"; ls -1 *.tar.gz *.tar.gz.sha256 SHA256SUMS
+
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
