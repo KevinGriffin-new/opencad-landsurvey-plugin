@@ -99,7 +99,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
                  LS_AUTOLABEL, LS_POINTLABEL. \
                  Field-to-finish: LS_FINISH (lines, symbols), LS_LIBRARY. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
-                 Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
+                 Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM, LS_CONTOURS. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
                  Labels: LS_LABELSTYLE. \
                  See PLUGIN.md for usage.",
@@ -151,6 +151,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_LANDXMLOUT" => {
             export_landxml(host, cmd);
+            true
+        }
+        "LS_CONTOURS" => {
+            draw_contours(host, cmd);
             true
         }
         "LS_DATUM" => {
@@ -1745,6 +1749,89 @@ fn surface_from_mesh(mesh: &Mesh) -> Surface {
         })
         .collect();
     Surface { nodes, triangles }
+}
+
+
+/// `LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]`.
+/// Draw continuous, tagged 3-D contour polylines from the named TIN.
+fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
+    let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if args.is_empty() || args.len() > 3 {
+        host.push_info("Usage: LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]");
+        return;
+    }
+    let interval = match args.get(1).unwrap_or(&"0.5").parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => v,
+        _ => { host.push_error("LS_CONTOURS: interval must be positive and finite"); return; }
+    };
+    let major_every = match args.get(2).unwrap_or(&"5").parse::<i64>() {
+        Ok(v) if v > 0 => v,
+        _ => { host.push_error("LS_CONTOURS: major-every must be a positive integer"); return; }
+    };
+    let name = args[0];
+    let surface = match resolve_named_surface(host, name) {
+        Ok(s) => s,
+        Err(e) => { host.push_error(&format!("LS_CONTOURS: {e}")); return; }
+    };
+    if surface.nodes.is_empty() {
+        host.push_error("LS_CONTOURS: empty TIN");
+        return;
+    }
+    if surface.nodes.iter().flatten().any(|v| !v.is_finite()) {
+        host.push_error("LS_CONTOURS: non-finite TIN node");
+        return;
+    }
+    let min_z = surface.nodes.iter().map(|n| n[2]).fold(f64::INFINITY, f64::min);
+    let max_z = surface.nodes.iter().map(|n| n[2]).fold(f64::NEG_INFINITY, f64::max);
+    let low = (min_z / interval).ceil();
+    let high = (max_z / interval).floor();
+    if !low.is_finite() || !high.is_finite()
+        || low < i64::MIN as f64 || high >= i64::MAX as f64
+        || high - low > 10_000.0
+    {
+        host.push_error("LS_CONTOURS: invalid elevation range or more than 10000 levels");
+        return;
+    }
+    let mut batch = Batch::new();
+    let mut curves = 0usize;
+    for k in (low as i64)..=(high as i64) {
+        let level = (k as f64) * interval;
+        let chains = match landsurvey::contours::contours_at_level(&surface, level) {
+            Ok(chains) => chains,
+            Err(err) => {
+                host.push_error(&format!("LS_CONTOURS: contour geometry error at {level}: {err:?}; drawing unchanged"));
+                return;
+            }
+        };
+        let layer = if k.rem_euclid(major_every) == 0 {
+            "LS-CONTOUR-MAJ"
+        } else {
+            "LS-CONTOUR-MIN"
+        };
+        for chain in chains {
+            if chain.points.len() < 2 { continue; }
+            let mut pl = Polyline3D::from_points(chain.points.iter()
+                .map(|p| Vector3::new(p[0], p[1], p[2])).collect());
+            pl.flags.closed = chain.closed;
+            let mut rec = surface_record(name, "CONTOUR");
+            rec.add_value(XDataValue::String(format!("{level:.12}")));
+            batch.add_tagged(EntityType::Polyline3D(pl), layer, rec);
+            curves += 1;
+        }
+    }
+    if batch.len() == 0 {
+        host.push_info("LS_CONTOURS: no contour polylines within the TIN's elevation range");
+        return;
+    }
+    // Generation completes before any document mutation. Existing contours are
+    // not replaced in this preliminary implementation; see regeneration tests.
+    host.push_undo("LS_CONTOURS draw");
+    let accepted = batch.commit(host);
+    if accepted > 0 {
+        host.bump_geometry();
+        host.set_dirty();
+    }
+    host.push_output(&format!("LS_CONTOURS: drew {accepted}/{curves} polylines for {name}"));
 }
 
 /// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a
