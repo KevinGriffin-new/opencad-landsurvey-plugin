@@ -3601,6 +3601,8 @@ mod tests {
         /// Accept this many `add_entities` calls, then return no handles, as
         /// the host does when a message is over its IPC size limit.
         bulk_limit: Option<usize>,
+        /// Accept only this many items on the next bulk call (simulated partial IPC write).
+        bulk_partial_once: Option<usize>,
         /// Answer `add_layer` and `table_operation(BlockCreate)` as the real
         /// host (API v7) does; off, they are refused like the trait defaults.
         scripted: bool,
@@ -3620,6 +3622,7 @@ mod tests {
                 single_adds: 0,
                 bulk_adds: 0,
                 bulk_limit: None,
+                bulk_partial_once: None,
                 scripted: false,
                 blocks_created: Vec::new(),
                 selected: Vec::new(),
@@ -3661,8 +3664,10 @@ mod tests {
             if self.bulk_limit.is_some_and(|limit| self.bulk_adds > limit) {
                 return Vec::new();
             }
+            let take = self.bulk_partial_once.take().unwrap_or(entities.len());
             entities
                 .into_iter()
+                .take(take)
                 .map(|e| {
                     self.ensure_layer(&e);
                     self.doc.add_entity(e).expect("add_entity")
@@ -5259,6 +5264,25 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         let after = contour_handles_for_surface(host.document(), "EG");
         assert_eq!(after, first, "failed insertion must not delete old contours");
         assert!(host.log.iter().any(|m| m.contains("incomplete insertion")));
+    }
+
+
+    #[test]
+    fn contours_partially_accepted_batch_rolls_back_new_handles() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let old = contour_handles_for_surface(host.document(), "EG");
+        assert!(old.len() > 1, "fixture must generate multiple contours");
+        host.bulk_partial_once = Some(1);
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        assert_eq!(
+            contour_handles_for_surface(host.document(), "EG"), old,
+            "partial insertion must not leave new curves or remove old ones"
+        );
+        assert!(host.log.iter().any(|line|
+            line.contains("incomplete insertion") && line.contains("rolled back 1/1")
+        ), "missing rollback report: {:?}", host.log);
     }
 
     #[test]
