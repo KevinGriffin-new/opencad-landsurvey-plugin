@@ -1823,15 +1823,35 @@ fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
         host.push_info("LS_CONTOURS: no contour polylines within the TIN's elevation range");
         return;
     }
-    // Generation completes before any document mutation. Existing contours are
-    // not replaced in this preliminary implementation; see regeneration tests.
-    host.push_undo("LS_CONTOURS draw");
-    let accepted = batch.commit(host);
-    if accepted > 0 {
+    // Compute all geometry before changing the document. Only retire existing
+    // contours after every new entity has been accepted.
+    let old = contour_handles_for_surface(host.document(), name);
+    host.push_undo("LS_CONTOURS regenerate");
+    let new_handles = batch.commit_with_handles(host);
+    if new_handles.len() != curves {
+        let removed = new_handles.iter().filter(|&&h| host.remove_entity(h)).count();
         host.bump_geometry();
         host.set_dirty();
+        host.push_error(&format!(
+            "LS_CONTOURS: incomplete insertion ({}/{}); rolled back {removed}/{} new entities; existing contours untouched.",
+            new_handles.len(), curves, new_handles.len()
+        ));
+        return;
     }
-    host.push_output(&format!("LS_CONTOURS: drew {accepted}/{curves} polylines for {name}"));
+    let removed_old = old.iter().filter(|&&h| host.remove_entity(h)).count();
+    host.bump_geometry();
+    host.set_dirty();
+    if removed_old != old.len() {
+        host.push_error(&format!(
+            "LS_CONTOURS: inserted {} new curves, but removed only {removed_old}/{} old curves. Review duplicates and use Undo if necessary.",
+            new_handles.len(), old.len()
+        ));
+        return;
+    }
+    host.push_output(&format!(
+        "LS_CONTOURS: drew {} polylines for {name}; replaced {removed_old} previous contours.",
+        new_handles.len()
+    ));
 }
 
 /// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a
