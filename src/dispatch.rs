@@ -5309,7 +5309,12 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         let before: Vec<_> = host.doc.entities().filter_map(|e| {
             let EntityType::Polyline3D(pl) = e else { return None; };
             let Some(("EG", "CONTOUR")) = surface_tag(e) else { return None; };
-            Some((e.common().layer.clone(), pl.vertices.len(), pl.flags.closed))
+            Some((e.common().layer.clone(), pl.flags.closed,
+                pl.vertices.iter().map(|v| [
+                    v.position.x.to_bits(),
+                    v.position.y.to_bits(),
+                    v.position.z.to_bits(),
+                ]).collect::<Vec<_>>()))
         }).collect();
         assert!(!before.is_empty(), "fixture must generate contours");
         assert!(before.iter().all(|(layer, _, _)| {
@@ -5322,14 +5327,19 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         let after: Vec<_> = reopened.entities().filter_map(|e| {
             let EntityType::Polyline3D(pl) = e else { return None; };
             let Some(("EG", "CONTOUR")) = surface_tag(e) else { return None; };
-            Some((e.common().layer.clone(), pl.vertices.len(), pl.flags.closed))
+            Some((e.common().layer.clone(), pl.flags.closed,
+                pl.vertices.iter().map(|v| [
+                    v.position.x.to_bits(),
+                    v.position.y.to_bits(),
+                    v.position.z.to_bits(),
+                ]).collect::<Vec<_>>()))
         }).collect();
         assert_eq!(after.len(), before.len(), "contours or XDATA lost in DWG");
         let mut before_sorted = before;
         let mut after_sorted = after;
         before_sorted.sort();
         after_sorted.sort();
-        assert_eq!(after_sorted, before_sorted, "contour layers/vertices/closure changed");
+        assert_eq!(after_sorted, before_sorted, "contour layers/XYZ/closure changed after DWG round-trip");
         assert!(reopened.layers.contains("LS-CONTOUR-MAJ")
             || reopened.layers.contains("LS-CONTOUR-MIN"));
     }
