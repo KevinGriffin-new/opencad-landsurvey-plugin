@@ -5230,6 +5230,52 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         assert!(contour_handles_for_surface(&doc, "MISSING").is_empty());
     }
 
+
+    #[test]
+    fn contours_dispatch_rerun_replaces_not_duplicates() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        assert!(handle(&mut host, "LS_CONTOURS EG 0.5 5"));
+        let first = contour_handles_for_surface(host.document(), "EG");
+        assert!(!first.is_empty(), "command should generate contours");
+        let count = first.len();
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Polyline3D(_))
+            && matches!(surface_tag(e), Some(("EG", "CONTOUR")))));
+        assert!(handle(&mut host, "LS_CONTOURS eg 0.5 5"));
+        let after = contour_handles_for_surface(host.document(), "EG");
+        assert_eq!(after.len(), count, "rerun must replace, not duplicate");
+        assert!(first.iter().all(|h| !after.contains(h)), "old handles should be retired");
+    }
+
+    #[test]
+    fn contours_failed_insertion_preserves_existing_curves() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let first = contour_handles_for_surface(host.document(), "EG");
+        assert!(!first.is_empty());
+        host.bulk_limit = Some(host.bulk_adds);
+        draw_contours(&mut host, "LS_CONTOURS EG 1 5");
+        let after = contour_handles_for_surface(host.document(), "EG");
+        assert_eq!(after, first, "failed insertion must not delete old contours");
+        assert!(host.log.iter().any(|m| m.contains("incomplete insertion")));
+    }
+
+    #[test]
+    fn contours_rerun_does_not_delete_other_surface() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        let mut other = EntityType::Polyline3D(Polyline3D::from_points(vec![
+            Vector3::new(0., 0., 2.),
+            Vector3::new(2., 0., 2.),
+        ]));
+        tag(&mut other, "FG", "CONTOUR");
+        let other_handle = host.doc.add_entity(other).expect("add FG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        draw_contours(&mut host, "LS_CONTOURS EG 1 5");
+        assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![other_handle]);
+    }
+
     #[test]
     fn mesh_surface_roundtrip_is_exact() {
         let surf = sample_surface();
