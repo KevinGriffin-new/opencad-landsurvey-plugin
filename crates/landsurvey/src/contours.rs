@@ -277,3 +277,50 @@ mod topology_regression_tests {
         }
     }
 }
+
+
+#[cfg(test)]
+mod boundary_regression_tests {
+    use super::*;
+
+    #[test]
+    fn horizontal_flat_surface_produces_no_spurious_contours() {
+        let surface = Surface {
+            nodes: vec![[0., 0., 10.], [2., 0., 10.], [0., 2., 10.], [2., 2., 10.]],
+            triangles: vec![[0, 1, 2], [1, 3, 2]],
+        };
+        for level in [9.5, 10., 10.5] {
+            assert!(contours_at_level(&surface, level).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn non_manifold_shared_edge_is_rejected() {
+        let surface = Surface {
+            nodes: vec![
+                [0., 0., 0.], [2., 0., 2.], [0., 2., 0.],
+                [2., 2., 2.], [1., -1., 1.],
+            ],
+            triangles: vec![[0, 1, 2], [1, 0, 3], [0, 1, 4]],
+        };
+        assert_eq!(
+            contours_at_level(&surface, 1.),
+            Err(ContourError::NonManifoldEdge)
+        );
+    }
+
+    #[test]
+    fn disconnected_tins_with_coincident_xy_are_not_stitched() {
+        // Identical positions do not imply shared mesh topology.
+        let surface = Surface {
+            nodes: vec![
+                [0., 0., 0.], [2., 0., 2.], [0., 2., 0.],
+                [0., 0., 0.], [2., 0., 2.], [0., 2., 0.],
+            ],
+            triangles: vec![[0, 1, 2], [3, 4, 5]],
+        };
+        let contours = contours_at_level(&surface, 1.).unwrap();
+        assert_eq!(contours.len(), 2);
+        assert!(contours.iter().all(|c| !c.closed && c.points.len() == 2));
+    }
+}
