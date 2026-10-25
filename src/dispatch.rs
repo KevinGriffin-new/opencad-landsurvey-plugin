@@ -2068,6 +2068,15 @@ fn surface_tag(e: &EntityType) -> Option<(&str, &str)> {
     Some((strs.next()?, strs.next()?))
 }
 
+/// Collect only contour polylines owned by a named surface.
+fn contour_handles_for_surface(doc: &codec::CadDocument, name: &str) -> Vec<codec::Handle> {
+    doc.entities()
+        .filter(|e| matches!(e, EntityType::Polyline3D(_)))
+        .filter(|e| matches!(surface_tag(e), Some((tag, "CONTOUR")) if tag.eq_ignore_ascii_case(name)))
+        .map(|e| e.common().handle)
+        .collect()
+}
+
 /// Rebuild the surface named `token` from tagged geometry in the drawing.
 /// Returns the canonical tagged name with the surface.
 ///
@@ -5175,6 +5184,30 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         tag(&mut ent, name, "TIN");
         doc.add_entity(ent).expect("add mesh");
         doc
+    }
+
+
+    #[test]
+    fn contour_replacement_targets_only_own_surface() {
+        let mut doc = CadDocument::default();
+        for (name, kind, layer) in [
+            ("EG", "CONTOUR", "LS-CONTOUR-MIN"),
+            ("eg", "CONTOUR", "LS-CONTOUR-MAJ"),
+            ("FG", "CONTOUR", "LS-CONTOUR-MIN"),
+            ("EG", "TIN", "LS-TIN"),
+        ] {
+            let mut ent = EntityType::Polyline3D(Polyline3D::from_points(vec![
+                Vector3::new(0., 0., 1.),
+                Vector3::new(1., 0., 1.),
+            ]));
+            ent.common_mut().layer = layer.to_string();
+            tag(&mut ent, name, kind);
+            doc.add_entity(ent).expect("add test polyline");
+        }
+        let owned = contour_handles_for_surface(&doc, "EG");
+        assert_eq!(owned.len(), 2);
+        assert_eq!(contour_handles_for_surface(&doc, "FG").len(), 1);
+        assert!(contour_handles_for_surface(&doc, "MISSING").is_empty());
     }
 
     #[test]
