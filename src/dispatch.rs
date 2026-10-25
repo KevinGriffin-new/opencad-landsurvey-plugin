@@ -5330,6 +5330,38 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![unrelated_handle]);
     }
 
+
+    #[test]
+    fn contours_negative_elevations_use_integer_major_indices() {
+        let mut host = TestHost::new();
+        let surface = Surface {
+            nodes: vec![
+                [0., 0., -2.], [10., 0., 2.], [0., 10., 2.],
+            ],
+            triangles: vec![[0, 1, 2]],
+        };
+        let mut mesh = EntityType::Mesh(mesh_from_surface(&surface));
+        tag(&mut mesh, "NEG", "TIN");
+        host.doc.add_entity(mesh).expect("negative TIN");
+        draw_contours(&mut host, "LS_CONTOURS NEG 1 2");
+        let contour_layers: Vec<(f64, String)> = host.doc.entities()
+            .filter_map(|e| {
+                let EntityType::Polyline3D(pl) = e else { return None; };
+                if !matches!(surface_tag(e), Some(("NEG", "CONTOUR"))) {
+                    return None;
+                }
+                Some((pl.vertices.first()?.position.z, e.common().layer.clone()))
+            })
+            .collect();
+        assert!(contour_layers.iter().any(|(z, l)| *z == -1. && l == "LS-CONTOUR-MIN"));
+        assert!(contour_layers.iter().any(|(z, l)| *z == 0. && l == "LS-CONTOUR-MAJ"));
+        assert!(contour_layers.iter().any(|(z, l)| *z == 1. && l == "LS-CONTOUR-MIN"));
+        assert!(contour_layers.iter().all(|(z, layer)|
+            ((*z as i64).rem_euclid(2) == 0)
+                == (layer == "LS-CONTOUR-MAJ")
+        ));
+    }
+
     #[test]
     fn contours_survive_dwg_roundtrip_with_layers_elevations_and_xdata() {
         let mut host = TestHost::new();
