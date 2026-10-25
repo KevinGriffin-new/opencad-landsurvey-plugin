@@ -206,3 +206,74 @@ mod tests {
         assert_eq!(contours_at_level(&s,f64::NAN),Err(ContourError::InvalidLevel));
     }
 }
+
+#[cfg(test)]
+mod topology_regression_tests {
+    use super::*;
+
+    fn saddle() -> Surface {
+        Surface {
+            nodes: vec![
+                [0., 0., 0.],
+                [1., 0., 1.],
+                [0., 1., -1.],
+                [-1., 0., 1.],
+                [0., -1., -1.],
+            ],
+            triangles: vec![
+                [0, 1, 2],
+                [0, 2, 3],
+                [0, 3, 4],
+                [0, 4, 1],
+            ],
+        }
+    }
+
+    #[test]
+    fn exact_saddle_never_cross_connects_branches() {
+        let contours = contours_at_level(&saddle(), 0.).unwrap();
+
+        assert_eq!(
+            contours.len(), 2,
+            "exact saddle must produce two distinct branches"
+        );
+
+        for contour in contours {
+            assert!(!contour.closed);
+            assert_eq!(contour.elevation, 0.);
+            assert!(contour.points.len() >= 2);
+        }
+    }
+
+    #[test]
+    fn off_saddle_levels_remain_disconnected() {
+        for z in [-0.25, 0.25] {
+            let contours = contours_at_level(&saddle(), z).unwrap();
+
+            assert_eq!(
+                contours.len(), 2,
+                "saddle branches must remain separate at z={z}"
+            );
+
+            assert!(contours.iter().all(|c| !c.closed));
+        }
+    }
+
+    #[test]
+    fn topology_is_independent_of_triangle_order() {
+        let original = saddle();
+        let mut reordered = original.clone();
+        reordered.triangles.reverse();
+
+        for z in [-0.25, 0., 0.25] {
+            let first = contours_at_level(&original, z).unwrap();
+            let second = contours_at_level(&reordered, z).unwrap();
+
+            assert_eq!(first.len(), second.len());
+            assert_eq!(
+                first.iter().filter(|c| c.closed).count(),
+                second.iter().filter(|c| c.closed).count()
+            );
+        }
+    }
+}
