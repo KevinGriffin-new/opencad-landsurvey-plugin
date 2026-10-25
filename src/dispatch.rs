@@ -5300,6 +5300,40 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![other_handle]);
     }
 
+
+    #[test]
+    fn contours_survive_dwg_roundtrip_with_layers_elevations_and_xdata() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let before: Vec<_> = host.doc.entities().filter_map(|e| {
+            let EntityType::Polyline3D(pl) = e else { return None; };
+            let Some(("EG", "CONTOUR")) = surface_tag(e) else { return None; };
+            Some((e.common().layer.clone(), pl.vertices.len(), pl.flags.closed))
+        }).collect();
+        assert!(!before.is_empty(), "fixture must generate contours");
+        assert!(before.iter().all(|(layer, _, _)| {
+            layer == "LS-CONTOUR-MAJ" || layer == "LS-CONTOUR-MIN"
+        }));
+        register_ls_app_ids(&mut host.doc);
+        let bytes = DwgWriter::write_to_vec(&host.doc).expect("save contours DWG");
+        let reopened = DwgReader::from_stream(Cursor::new(bytes))
+            .read().expect("reopen contours DWG");
+        let after: Vec<_> = reopened.entities().filter_map(|e| {
+            let EntityType::Polyline3D(pl) = e else { return None; };
+            let Some(("EG", "CONTOUR")) = surface_tag(e) else { return None; };
+            Some((e.common().layer.clone(), pl.vertices.len(), pl.flags.closed))
+        }).collect();
+        assert_eq!(after.len(), before.len(), "contours or XDATA lost in DWG");
+        let mut before_sorted = before;
+        let mut after_sorted = after;
+        before_sorted.sort();
+        after_sorted.sort();
+        assert_eq!(after_sorted, before_sorted, "contour layers/vertices/closure changed");
+        assert!(reopened.layers.contains("LS-CONTOUR-MAJ")
+            || reopened.layers.contains("LS-CONTOUR-MIN"));
+    }
+
     #[test]
     fn mesh_surface_roundtrip_is_exact() {
         let surf = sample_surface();
