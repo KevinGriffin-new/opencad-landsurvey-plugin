@@ -180,7 +180,7 @@ impl CadModule for LandSurveyModule {
                     RibbonItem::LargeTool(ToolDef {
                         id: "LS_CONTOURS",
                         label: "Contours",
-                        icon: IconKind::Glyph("\\u{224b}"), // ≋ (contour lines)
+                        icon: IconKind::Glyph("≋"), // contour lines
                         event: ModuleEvent::Command("LS_CONTOURS".to_string()),
                     }),
                     // Clicking prints usage; the user then types
