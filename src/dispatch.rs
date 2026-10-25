@@ -3603,6 +3603,7 @@ mod tests {
         bulk_limit: Option<usize>,
         /// Accept only this many items on the next bulk call (simulated partial IPC write).
         bulk_partial_once: Option<usize>,
+        blocked_remove: Option<codec::Handle>,
         /// Answer `add_layer` and `table_operation(BlockCreate)` as the real
         /// host (API v7) does; off, they are refused like the trait defaults.
         scripted: bool,
@@ -3623,6 +3624,7 @@ mod tests {
                 bulk_adds: 0,
                 bulk_limit: None,
                 bulk_partial_once: None,
+                blocked_remove: None,
                 scripted: false,
                 blocks_created: Vec::new(),
                 selected: Vec::new(),
@@ -3673,6 +3675,12 @@ mod tests {
                     self.doc.add_entity(e).expect("add_entity")
                 })
                 .collect()
+        }
+        fn remove_entity(&mut self, handle: codec::Handle) -> bool {
+            if self.blocked_remove == Some(handle) { return false; }
+            if self.doc.get_entity(handle).is_none() { return false; }
+            self.doc.remove_entity(handle);
+            true
         }
         fn bump_geometry(&mut self) {}
         fn add_layer(&mut self, config: LayerConfig) -> Option<codec::Handle> {
@@ -5300,6 +5308,27 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![other_handle]);
     }
 
+
+
+    #[test]
+    fn contours_old_entity_removal_failure_is_reported_and_preserves_other_surfaces() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let old = contour_handles_for_surface(host.document(), "EG");
+        assert!(!old.is_empty());
+        let mut unrelated = EntityType::Polyline3D(Polyline3D::from_points(vec![
+            Vector3::new(0., 0., 2.), Vector3::new(2., 0., 2.),
+        ]));
+        tag(&mut unrelated, "FG", "CONTOUR");
+        let unrelated_handle = host.doc.add_entity(unrelated).expect("add unrelated");
+        host.blocked_remove = Some(old[0]);
+        draw_contours(&mut host, "LS_CONTOURS EG 1 5");
+        assert!(host.log.iter().any(|m| m.contains("removed only") && m.contains("Review duplicates")),
+            "missing explicit failure report: {:?}", host.log);
+        assert!(host.doc.get_entity(old[0]).is_some(), "failed removal should not erase old curve");
+        assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![unrelated_handle]);
+    }
 
     #[test]
     fn contours_survive_dwg_roundtrip_with_layers_elevations_and_xdata() {
