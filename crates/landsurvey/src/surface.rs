@@ -358,6 +358,76 @@ pub(crate) fn tri_cut_fill_seg(tri: &[[f64; 3]; 3]) -> (f64, f64, Option<[[f64; 
     (cut, fill, Some([[cla[0], cla[1]], [clb[0], clb[1]]]))
 }
 
+
+/// Triangle contour segment and the two local edges it crosses.
+///
+/// The returned points have the same order as the edge pairs.
+/// Local indices are in the range 0..3 and must be mapped through
+/// the source triangle to obtain global TIN edge identifiers.
+pub(crate) fn tri_cut_fill_seg_with_edges(
+    tri: &[[f64; 3]; 3],
+) -> Option<([[f64; 2]; 2], [(usize, usize); 2])> {
+    let (_, _, segment) = tri_cut_fill_seg(tri);
+    let points = segment?;
+
+    let positive: Vec<usize> = (0..3)
+        .filter(|&i| tri[i][2] > 0.0)
+        .collect();
+    let negative: Vec<usize> = (0..3)
+        .filter(|&i| tri[i][2] < 0.0)
+        .collect();
+
+    let lone = if positive.len() == 1 {
+        positive[0]
+    } else if negative.len() == 1 {
+        negative[0]
+    } else {
+        return None;
+    };
+
+    let others: Vec<usize> = (0..3)
+        .filter(|&i| i != lone)
+        .collect();
+
+    Some((
+        points,
+        [(lone, others[0]), (lone, others[1])],
+    ))
+}
+
+#[cfg(test)]
+mod contour_edge_tests {
+    use super::*;
+
+    #[test]
+    fn triangle_crossing_preserves_edge_identity() {
+        let triangle = [
+            [0.0, 0.0, -1.0],
+            [2.0, 0.0, 1.0],
+            [0.0, 2.0, 1.0],
+        ];
+
+        let (points, edges) =
+            tri_cut_fill_seg_with_edges(&triangle).unwrap();
+
+        assert_eq!(edges, [(0, 1), (0, 2)]);
+        assert_eq!(points[0], [1.0, 0.0]);
+        assert_eq!(points[1], [0.0, 1.0]);
+    }
+
+    #[test]
+    fn triangle_without_crossing_has_no_edges() {
+        let triangle = [
+            [0.0, 0.0, 1.0],
+            [2.0, 0.0, 2.0],
+            [0.0, 2.0, 3.0],
+        ];
+
+        assert!(
+            tri_cut_fill_seg_with_edges(&triangle).is_none()
+        );
+    }
+}
 // --- plane through 3 points (z as a linear function of x,y) ------------------
 
 struct Plane {
