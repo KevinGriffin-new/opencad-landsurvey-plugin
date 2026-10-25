@@ -59,6 +59,13 @@ impl Batch {
     /// accepted; when a chunk fails that is less than [`len`](Self::len), and
     /// the shortfall is reported on the command line.
     pub fn commit(self, host: &mut dyn HostApi) -> usize {
+        self.commit_with_handles(host).len()
+    }
+
+    /// Insert and return the accepted handles so a caller can undo an incomplete
+    /// insertion before changing existing entities. The host's AddEntities API
+    /// does not offer atomic transactions.
+    pub fn commit_with_handles(self, host: &mut dyn HostApi) -> Vec<Handle> {
         let queued = self.entities.len();
         let mut handles: Vec<Handle> = Vec::with_capacity(self.entities.len());
         let mut rest = self.entities;
@@ -84,6 +91,6 @@ impl Batch {
                 handles.len()
             ));
         }
-        handles.len()
+        handles
     }
 }
