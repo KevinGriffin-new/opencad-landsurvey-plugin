@@ -326,7 +326,7 @@ fn tri_signed_prism(tri: &[[f64; 3]; 3]) -> f64 {
 /// `(cut, fill)` for one triangle relative to `h = 0`, splitting at the `h = 0`
 /// contour when the facet crosses it; also returns the `h = 0` crossing segment
 /// (in plan) when the facet straddles the datum — the local cut/fill-line piece.
-fn tri_cut_fill_seg(tri: &[[f64; 3]; 3]) -> (f64, f64, Option<[[f64; 2]; 2]>) {
+pub(crate) fn tri_cut_fill_seg(tri: &[[f64; 3]; 3]) -> (f64, f64, Option<[[f64; 2]; 2]>) {
     let hs = [tri[0][2], tri[1][2], tri[2][2]];
     let pos: Vec<usize> = (0..3).filter(|&i| hs[i] > 0.0).collect();
     let neg: Vec<usize> = (0..3).filter(|&i| hs[i] < 0.0).collect();
