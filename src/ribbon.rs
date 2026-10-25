@@ -176,6 +176,13 @@ impl CadModule for LandSurveyModule {
                         icon: IconKind::Glyph("\u{2206}"), // ∆ (cut/fill)
                         event: ModuleEvent::Command("LS_VOLUME".to_string()),
                     }),
+                    // Click to show command usage; supply the surface name in the command line.
+                    RibbonItem::LargeTool(ToolDef {
+                        id: "LS_CONTOURS",
+                        label: "Contours",
+                        icon: IconKind::Glyph("\\u{224b}"), // ≋ (contour lines)
+                        event: ModuleEvent::Command("LS_CONTOURS".to_string()),
+                    }),
                     // Clicking prints usage; the user then types
                     // `LS_DATUM <surface> <elevation>`.
                     RibbonItem::LargeTool(ToolDef {
