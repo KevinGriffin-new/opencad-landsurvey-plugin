@@ -99,7 +99,7 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
                  LS_AUTOLABEL, LS_POINTLABEL. \
                  Field-to-finish: LS_FINISH (lines, symbols), LS_LIBRARY. \
                  Import / export: LS_IMPORTPLAN, LS_LANDXML, LS_LANDXMLOUT. \
-                 Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM. \
+                 Surfaces: LS_SURFACE, LS_VOLUME, LS_DATUM, LS_CONTOURS. \
                  COGO / transforms: LS_INVERSE, LS_RTS, LS_HELMERT, LS_RESECT. \
                  Labels: LS_LABELSTYLE. \
                  See PLUGIN.md for usage.",
@@ -151,6 +151,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
         }
         "LS_LANDXMLOUT" => {
             export_landxml(host, cmd);
+            true
+        }
+        "LS_CONTOURS" => {
+            draw_contours(host, cmd);
             true
         }
         "LS_DATUM" => {
@@ -1747,6 +1751,109 @@ fn surface_from_mesh(mesh: &Mesh) -> Surface {
     Surface { nodes, triangles }
 }
 
+
+/// `LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]`.
+/// Draw continuous, tagged 3-D contour polylines from the named TIN.
+fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
+    let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
+    if args.is_empty() || args.len() > 3 {
+        host.push_info("Usage: LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]");
+        return;
+    }
+    let interval = match args.get(1).unwrap_or(&"0.5").parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => v,
+        _ => { host.push_error("LS_CONTOURS: interval must be positive and finite"); return; }
+    };
+    let major_every = match args.get(2).unwrap_or(&"5").parse::<i64>() {
+        Ok(v) if v > 0 => v,
+        _ => { host.push_error("LS_CONTOURS: major-every must be a positive integer"); return; }
+    };
+    let name = args[0];
+    let surface = match resolve_named_surface(host, name) {
+        Ok(s) => s,
+        Err(e) => { host.push_error(&format!("LS_CONTOURS: {e}")); return; }
+    };
+    if surface.nodes.is_empty() {
+        host.push_error("LS_CONTOURS: empty TIN");
+        return;
+    }
+    if surface.nodes.iter().flatten().any(|v| !v.is_finite()) {
+        host.push_error("LS_CONTOURS: non-finite TIN node");
+        return;
+    }
+    let min_z = surface.nodes.iter().map(|n| n[2]).fold(f64::INFINITY, f64::min);
+    let max_z = surface.nodes.iter().map(|n| n[2]).fold(f64::NEG_INFINITY, f64::max);
+    let low = (min_z / interval).ceil();
+    let high = (max_z / interval).floor();
+    if !low.is_finite() || !high.is_finite()
+        || low < i64::MIN as f64 || high >= i64::MAX as f64
+        || high - low > 10_000.0
+    {
+        host.push_error("LS_CONTOURS: invalid elevation range or more than 10000 levels");
+        return;
+    }
+    let mut batch = Batch::new();
+    let mut curves = 0usize;
+    for k in (low as i64)..=(high as i64) {
+        let level = (k as f64) * interval;
+        let chains = match landsurvey::contours::contours_at_level(&surface, level) {
+            Ok(chains) => chains,
+            Err(err) => {
+                host.push_error(&format!("LS_CONTOURS: contour geometry error at {level}: {err:?}; drawing unchanged"));
+                return;
+            }
+        };
+        let layer = if k.rem_euclid(major_every) == 0 {
+            "LS-CONTOUR-MAJ"
+        } else {
+            "LS-CONTOUR-MIN"
+        };
+        for chain in chains {
+            if chain.points.len() < 2 { continue; }
+            let mut pl = Polyline3D::from_points(chain.points.iter()
+                .map(|p| Vector3::new(p[0], p[1], p[2])).collect());
+            pl.flags.closed = chain.closed;
+            let mut rec = surface_record(name, "CONTOUR");
+            rec.add_value(XDataValue::String(format!("{level:.12}")));
+            batch.add_tagged(EntityType::Polyline3D(pl), layer, rec);
+            curves += 1;
+        }
+    }
+    if batch.len() == 0 {
+        host.push_info("LS_CONTOURS: no contour polylines within the TIN's elevation range");
+        return;
+    }
+    // Compute all geometry before changing the document. Only retire existing
+    // contours after every new entity has been accepted.
+    let old = contour_handles_for_surface(host.document(), name);
+    host.push_undo("LS_CONTOURS regenerate");
+    let new_handles = batch.commit_with_handles(host);
+    if new_handles.len() != curves {
+        let removed = new_handles.iter().filter(|&&h| host.remove_entity(h)).count();
+        host.bump_geometry();
+        host.set_dirty();
+        host.push_error(&format!(
+            "LS_CONTOURS: incomplete insertion ({}/{}); rolled back {removed}/{} new entities; existing contours untouched.",
+            new_handles.len(), curves, new_handles.len()
+        ));
+        return;
+    }
+    let removed_old = old.iter().filter(|&&h| host.remove_entity(h)).count();
+    host.bump_geometry();
+    host.set_dirty();
+    if removed_old != old.len() {
+        host.push_error(&format!(
+            "LS_CONTOURS: inserted {} new curves, but removed only {removed_old}/{} old curves. Review duplicates and use Undo if necessary.",
+            new_handles.len(), old.len()
+        ));
+        return;
+    }
+    host.push_output(&format!(
+        "LS_CONTOURS: drew {} polylines for {name}; replaced {removed_old} previous contours.",
+        new_handles.len()
+    ));
+}
+
 /// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a
 /// horizontal plane. Draws the TIN, the datum contour, and a result label.
 fn datum_volume(host: &mut dyn HostApi, cmd: &str) {
@@ -1979,6 +2086,15 @@ fn surface_tag(e: &EntityType) -> Option<(&str, &str)> {
         _ => None,
     });
     Some((strs.next()?, strs.next()?))
+}
+
+/// Collect only contour polylines owned by a named surface.
+fn contour_handles_for_surface(doc: &codec::CadDocument, name: &str) -> Vec<codec::Handle> {
+    doc.entities()
+        .filter(|e| matches!(e, EntityType::Polyline3D(_)))
+        .filter(|e| matches!(surface_tag(e), Some((tag, "CONTOUR")) if tag.eq_ignore_ascii_case(name)))
+        .map(|e| e.common().handle)
+        .collect()
 }
 
 /// Rebuild the surface named `token` from tagged geometry in the drawing.
@@ -3485,6 +3601,9 @@ mod tests {
         /// Accept this many `add_entities` calls, then return no handles, as
         /// the host does when a message is over its IPC size limit.
         bulk_limit: Option<usize>,
+        /// Accept only this many items on the next bulk call (simulated partial IPC write).
+        bulk_partial_once: Option<usize>,
+        blocked_remove: Option<codec::Handle>,
         /// Answer `add_layer` and `table_operation(BlockCreate)` as the real
         /// host (API v7) does; off, they are refused like the trait defaults.
         scripted: bool,
@@ -3504,6 +3623,8 @@ mod tests {
                 single_adds: 0,
                 bulk_adds: 0,
                 bulk_limit: None,
+                bulk_partial_once: None,
+                blocked_remove: None,
                 scripted: false,
                 blocks_created: Vec::new(),
                 selected: Vec::new(),
@@ -3545,13 +3666,21 @@ mod tests {
             if self.bulk_limit.is_some_and(|limit| self.bulk_adds > limit) {
                 return Vec::new();
             }
+            let take = self.bulk_partial_once.take().unwrap_or(entities.len());
             entities
                 .into_iter()
+                .take(take)
                 .map(|e| {
                     self.ensure_layer(&e);
                     self.doc.add_entity(e).expect("add_entity")
                 })
                 .collect()
+        }
+        fn remove_entity(&mut self, handle: codec::Handle) -> bool {
+            if self.blocked_remove == Some(handle) { return false; }
+            if self.doc.get_entity(handle).is_none() { return false; }
+            self.doc.remove_entity(handle);
+            true
         }
         fn bump_geometry(&mut self) {}
         fn add_layer(&mut self, config: LayerConfig) -> Option<codec::Handle> {
@@ -5088,6 +5217,192 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         tag(&mut ent, name, "TIN");
         doc.add_entity(ent).expect("add mesh");
         doc
+    }
+
+
+    #[test]
+    fn contour_replacement_targets_only_own_surface() {
+        let mut doc = CadDocument::default();
+        for (name, kind, layer) in [
+            ("EG", "CONTOUR", "LS-CONTOUR-MIN"),
+            ("eg", "CONTOUR", "LS-CONTOUR-MAJ"),
+            ("FG", "CONTOUR", "LS-CONTOUR-MIN"),
+            ("EG", "TIN", "LS-TIN"),
+        ] {
+            let mut ent = EntityType::Polyline3D(Polyline3D::from_points(vec![
+                Vector3::new(0., 0., 1.),
+                Vector3::new(1., 0., 1.),
+            ]));
+            ent.common_mut().layer = layer.to_string();
+            tag(&mut ent, name, kind);
+            doc.add_entity(ent).expect("add test polyline");
+        }
+        let owned = contour_handles_for_surface(&doc, "EG");
+        assert_eq!(owned.len(), 2);
+        assert_eq!(contour_handles_for_surface(&doc, "FG").len(), 1);
+        assert!(contour_handles_for_surface(&doc, "MISSING").is_empty());
+    }
+
+
+    #[test]
+    fn contours_dispatch_rerun_replaces_not_duplicates() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        assert!(handle(&mut host, "LS_CONTOURS EG 0.5 5"));
+        let first = contour_handles_for_surface(host.document(), "EG");
+        assert!(!first.is_empty(), "command should generate contours");
+        let count = first.len();
+        assert!(host.doc.entities().any(|e| matches!(e, EntityType::Polyline3D(_))
+            && matches!(surface_tag(e), Some(("EG", "CONTOUR")))));
+        assert!(handle(&mut host, "LS_CONTOURS eg 0.5 5"));
+        let after = contour_handles_for_surface(host.document(), "EG");
+        assert_eq!(after.len(), count, "rerun must replace, not duplicate");
+        assert!(first.iter().all(|h| !after.contains(h)), "old handles should be retired");
+    }
+
+    #[test]
+    fn contours_failed_insertion_preserves_existing_curves() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let first = contour_handles_for_surface(host.document(), "EG");
+        assert!(!first.is_empty());
+        host.bulk_limit = Some(host.bulk_adds);
+        draw_contours(&mut host, "LS_CONTOURS EG 1 5");
+        let after = contour_handles_for_surface(host.document(), "EG");
+        assert_eq!(after, first, "failed insertion must not delete old contours");
+        assert!(host.log.iter().any(|m| m.contains("incomplete insertion")));
+    }
+
+
+    #[test]
+    fn contours_partially_accepted_batch_rolls_back_new_handles() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let old = contour_handles_for_surface(host.document(), "EG");
+        assert!(old.len() > 1, "fixture must generate multiple contours");
+        host.bulk_partial_once = Some(1);
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        assert_eq!(
+            contour_handles_for_surface(host.document(), "EG"), old,
+            "partial insertion must not leave new curves or remove old ones"
+        );
+        assert!(host.log.iter().any(|line|
+            line.contains("incomplete insertion") && line.contains("rolled back 1/1")
+        ), "missing rollback report: {:?}", host.log);
+    }
+
+    #[test]
+    fn contours_rerun_does_not_delete_other_surface() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        let mut other = EntityType::Polyline3D(Polyline3D::from_points(vec![
+            Vector3::new(0., 0., 2.),
+            Vector3::new(2., 0., 2.),
+        ]));
+        tag(&mut other, "FG", "CONTOUR");
+        let other_handle = host.doc.add_entity(other).expect("add FG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        draw_contours(&mut host, "LS_CONTOURS EG 1 5");
+        assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![other_handle]);
+    }
+
+
+
+    #[test]
+    fn contours_old_entity_removal_failure_is_reported_and_preserves_other_surfaces() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let old = contour_handles_for_surface(host.document(), "EG");
+        assert!(!old.is_empty());
+        let mut unrelated = EntityType::Polyline3D(Polyline3D::from_points(vec![
+            Vector3::new(0., 0., 2.), Vector3::new(2., 0., 2.),
+        ]));
+        tag(&mut unrelated, "FG", "CONTOUR");
+        let unrelated_handle = host.doc.add_entity(unrelated).expect("add unrelated");
+        host.blocked_remove = Some(old[0]);
+        draw_contours(&mut host, "LS_CONTOURS EG 1 5");
+        assert!(host.log.iter().any(|m| m.contains("removed only") && m.contains("Review duplicates")),
+            "missing explicit failure report: {:?}", host.log);
+        assert!(host.doc.get_entity(old[0]).is_some(), "failed removal should not erase old curve");
+        assert_eq!(contour_handles_for_surface(host.document(), "FG"), vec![unrelated_handle]);
+    }
+
+
+    #[test]
+    fn contours_negative_elevations_use_integer_major_indices() {
+        let mut host = TestHost::new();
+        let surface = Surface {
+            nodes: vec![
+                [0., 0., -2.], [10., 0., 2.], [0., 10., 2.],
+            ],
+            triangles: vec![[0, 1, 2]],
+        };
+        let mut mesh = EntityType::Mesh(mesh_from_surface(&surface));
+        tag(&mut mesh, "NEG", "TIN");
+        host.doc.add_entity(mesh).expect("negative TIN");
+        draw_contours(&mut host, "LS_CONTOURS NEG 1 2");
+        let contour_layers: Vec<(f64, String)> = host.doc.entities()
+            .filter_map(|e| {
+                let EntityType::Polyline3D(pl) = e else { return None; };
+                if !matches!(surface_tag(e), Some(("NEG", "CONTOUR"))) {
+                    return None;
+                }
+                Some((pl.vertices.first()?.position.z, e.common().layer.clone()))
+            })
+            .collect();
+        assert!(contour_layers.iter().any(|(z, l)| *z == -1. && l == "LS-CONTOUR-MIN"));
+        assert!(contour_layers.iter().any(|(z, l)| *z == 0. && l == "LS-CONTOUR-MAJ"));
+        assert!(contour_layers.iter().any(|(z, l)| *z == 1. && l == "LS-CONTOUR-MIN"));
+        assert!(contour_layers.iter().all(|(z, layer)|
+            ((*z as i64).rem_euclid(2) == 0)
+                == (layer == "LS-CONTOUR-MAJ")
+        ));
+    }
+
+    #[test]
+    fn contours_survive_dwg_roundtrip_with_layers_elevations_and_xdata() {
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        draw_contours(&mut host, "LS_CONTOURS EG 0.5 5");
+        let before: Vec<_> = host.doc.entities().filter_map(|e| {
+            let EntityType::Polyline3D(pl) = e else { return None; };
+            let Some(("EG", "CONTOUR")) = surface_tag(e) else { return None; };
+            Some((e.common().layer.clone(), pl.flags.closed,
+                pl.vertices.iter().map(|v| [
+                    v.position.x.to_bits(),
+                    v.position.y.to_bits(),
+                    v.position.z.to_bits(),
+                ]).collect::<Vec<_>>()))
+        }).collect();
+        assert!(!before.is_empty(), "fixture must generate contours");
+        assert!(before.iter().all(|(layer, _, _)| {
+            layer == "LS-CONTOUR-MAJ" || layer == "LS-CONTOUR-MIN"
+        }));
+        register_ls_app_ids(&mut host.doc);
+        let bytes = DwgWriter::write_to_vec(&host.doc).expect("save contours DWG");
+        let reopened = DwgReader::from_stream(Cursor::new(bytes))
+            .read().expect("reopen contours DWG");
+        let after: Vec<_> = reopened.entities().filter_map(|e| {
+            let EntityType::Polyline3D(pl) = e else { return None; };
+            let Some(("EG", "CONTOUR")) = surface_tag(e) else { return None; };
+            Some((e.common().layer.clone(), pl.flags.closed,
+                pl.vertices.iter().map(|v| [
+                    v.position.x.to_bits(),
+                    v.position.y.to_bits(),
+                    v.position.z.to_bits(),
+                ]).collect::<Vec<_>>()))
+        }).collect();
+        assert_eq!(after.len(), before.len(), "contours or XDATA lost in DWG");
+        let mut before_sorted = before;
+        let mut after_sorted = after;
+        before_sorted.sort();
+        after_sorted.sort();
+        assert_eq!(after_sorted, before_sorted, "contour layers/XYZ/closure changed after DWG round-trip");
+        assert!(reopened.layers.contains("LS-CONTOUR-MAJ")
+            || reopened.layers.contains("LS-CONTOUR-MIN"));
     }
 
     #[test]
