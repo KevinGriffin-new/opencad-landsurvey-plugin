@@ -21,17 +21,14 @@ def test_2026_36_dependency_override():
 
 def test_2026_42_renamed_codec_and_api():
     # v2026.42 renamed the codec package back to `acadrust` (same opencadcodec
-    # repo) and raised the API window to [3, 10]; the shipped manifest tracks it.
+    # repo) and raised the API window to [3, 10].
     fixture = Path(__file__).parent / "fixtures" / "host" / "v2026.42"
     read = lambda name: (fixture / name).read_text(encoding="utf-8")
     plan = gates.host_acadrust_plan(read("ocs_plugin_api-Cargo.toml"), read("Cargo.toml"), read("Cargo.lock"))
     assert (plan["package"], plan["rev"]) == ("acadrust", "5d4f11a")
     assert plan["locked_rev"] == "5d4f11ae38758caec540bc9819ff2c4120eeadb4"
-    result = gates.gate_api_version(read("manifest.rs"), (ROOT / "plugin.toml").read_text(), "v2026.42")
-    assert result["target"] == 10
-    report = gates.gate_acadrust(read("Cargo.lock"), (ROOT / "Cargo.toml").read_text(),
-                                (ROOT / "Cargo.lock").read_text(), "v2026.42")
-    assert report["host_version"] == "0.6.4"
+    assert gates.api_version_window(read("manifest.rs")) == (3, 10)
+    assert gates.locked_codec(read("Cargo.lock"))["version"] == "0.6.4"
 
 
 def test_generated_manifest_uses_resolved_source():

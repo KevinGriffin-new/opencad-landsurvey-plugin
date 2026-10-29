@@ -74,6 +74,13 @@ CODEC_TAGS = {
     # escalated on the rename; this is the fixture that re-pin left behind.
     "v2026.42": ("acadrust", "0.6.4", "github.com/HakanSeven12/opencadcodec",
                  "5d4f11ae38758caec540bc9819ff2c4120eeadb4"),
+    "v2026.43": ("acadrust", "0.6.6", "github.com/HakanSeven12/opencadcodec",
+                 "24b037af9d1490b83464e5d43b14a7f4d12744e8"),
+    # Upstream main after v2026.43, the snapshot canary #71 could not read:
+    # ocs_plugin_api's codec became opencaddocument, a new facade crate that
+    # depends on acadrust and re-exports it. The lockfile carries both.
+    "main-7c5594c": ("opencaddocument", "0.1.0", "github.com/HakanSeven12/opencaddocument",
+                     "fdd1d67404b4f7f269ebd8bbe5361d2485cccb62"),
 }
 
 # How each tag spells [dependencies].acadrust in its Cargo.toml. The v0.8.8 row
@@ -94,6 +101,8 @@ MANIFEST_SHAPES = {
     "v2026.40.1": "git",
     "v2026.41": "git",
     "v2026.42": "git",
+    "v2026.43": "git",
+    "main-7c5594c": "git",
 }
 
 API_WINDOWS = {
@@ -111,6 +120,8 @@ API_WINDOWS = {
     "v2026.40.1": (3, 7),
     "v2026.41": (3, 7),
     "v2026.42": (3, 10),
+    "v2026.43": (3, 13),
+    "main-7c5594c": (3, 13),
 }
 
 
@@ -428,7 +439,10 @@ def plugin_api(tag: str) -> str:
     return host(tag, "ocs_plugin_api-Cargo.toml")
 
 
-def tag_order(tag: str) -> tuple[int, ...]:
+def tag_order(tag: str) -> tuple[float, ...]:
+    # A `main-<sha>` snapshot from the canary is newer than every release tag.
+    if tag.startswith("main-"):
+        return (float("inf"),)
     return tuple(int(x) for x in tag.lstrip("v").split("."))
 
 
@@ -637,14 +651,15 @@ def test_gate_source_identity_rejects_an_expanded_rev():
 
 
 def test_gate_source_identity_rejects_an_expanded_opencadcodec_rev():
-    """The same trap in the renamed package: v2026.42 writes rev = "5d4f11a"."""
+    """The same trap in the renamed package, on whatever host we ship against."""
+    tag = shipped_host_tag()
     shipped = (REPO / "Cargo.toml").read_text(encoding="utf-8")
-    assert 'rev = "5d4f11a"' in shipped
-    expanded = shipped.replace(
-        'rev = "5d4f11a"', 'rev = "5d4f11ae38758caec540bc9819ff2c4120eeadb4"'
-    )
+    _, _, rev = rg.linked_codec(plugin_api(tag))
+    full = CODEC_TAGS[tag][3]
+    assert f'rev = "{rev}"' in shipped and full.startswith(rev) and full != rev
+    expanded = shipped.replace(f'rev = "{rev}"', f'rev = "{full}"')
     with pytest.raises(rg.Escalate, match="abbreviated versus a full rev"):
-        rg.gate_source_identity(expanded, plugin_api("v2026.42"))
+        rg.gate_source_identity(expanded, plugin_api(tag))
 
 
 def test_gate_source_identity_rejects_the_legacy_patch_manifest():
@@ -788,9 +803,8 @@ def test_two_codecs_in_one_lockfile_escalate():
 
 
 def test_shipped_manifest_passes_every_gate_against_its_host():
-    """What we ship today, against the host it is pinned to (v2026.42)."""
+    """What we ship today, against the host it is pinned to."""
     tag = shipped_host_tag()
-    assert tag == "v2026.42"
     cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
     lock = (REPO / "Cargo.lock").read_text(encoding="utf-8")
     report = rg.gate_acadrust(host(tag, "Cargo.lock"), cargo, lock, tag=tag)
@@ -798,7 +812,7 @@ def test_shipped_manifest_passes_every_gate_against_its_host():
     rg.gate_source_identity(cargo, plugin_api(tag), host(tag, "Cargo.toml"))
     assert rg.gate_abi(lock, CODEC_TAGS[tag][3])["package"] == "acadrust"
     api = rg.gate_api_version(host(tag, "manifest.rs"), (REPO / "plugin.toml").read_text(encoding="utf-8"), tag)
-    assert api["ours"] == api["target"] == 10
+    assert api["ours"] == api["target"] == API_WINDOWS[tag][1]
 
 
 def test_codec_series_bump_escalates():
@@ -823,3 +837,57 @@ def test_rewrite_keeps_the_codec_package_and_key():
     # A [patch] entry is keyed by package name, not by our dependency key.
     assert 'acadrust = { git = "https://git@github.com/HakanSeven12/opencadcodec.git"' in out
     assert rg.effective_acadrust(out) == ("https://git@github.com/HakanSeven12/opencadcodec.git", "c" * 40)
+
+
+# ------------------------------------- the opencaddocument facade (main, #71)
+
+MAIN = "main-7c5594c"
+
+
+def test_facade_lockfile_resolves_to_the_facade_not_two_codecs():
+    """opencaddocument depends on acadrust: one codec wrapping another, which
+    the two-codec rule would otherwise read as two builds in one graph."""
+    lock = host(MAIN, "Cargo.lock")
+    names = {p["name"] for p in tomllib.loads(lock)["package"]}
+    assert {"acadrust", "opencaddocument"} <= names
+    assert rg.locked_codec(lock)["name"] == "opencaddocument"
+
+
+def test_codec_dep_finds_the_facade_under_the_codec_key():
+    key, package, _ = rg.codec_dep(plugin_api(MAIN))
+    assert (key, package) == ("codec", "opencaddocument")
+
+
+def test_a_wrapped_codec_still_needs_the_dependency_edge():
+    """Without the dependency edge they really are two codecs."""
+    both = lock_with(
+        ("acadrust", "0.6.8", CADCODEC),
+        ("opencaddocument", "0.1.0",
+         "git+https://github.com/HakanSeven12/opencaddocument.git?rev=fdd1d67#" + "f" * 40),
+    )
+    with pytest.raises(rg.Escalate, match="two CAD codecs"):
+        rg.locked_codec(both)
+
+
+def test_shipped_plugin_escalates_on_the_facade_rather_than_failing_to_parse():
+    """What canary #71 reported as exit 2 is a human decision: moving to the
+    facade changes the plugin's source (CadDocument becomes Document)."""
+    cargo = (REPO / "Cargo.toml").read_text(encoding="utf-8")
+    lock = (REPO / "Cargo.lock").read_text(encoding="utf-8")
+    with pytest.raises(rg.Escalate, match="source migration"):
+        rg.gate_acadrust(host(MAIN, "Cargo.lock"), cargo, lock, tag="main")
+    with pytest.raises(rg.Escalate, match="source migration"):
+        rg.gate_source_identity(cargo, plugin_api(MAIN), host(MAIN, "Cargo.toml"))
+
+
+def test_canary_commands_read_the_facade(tmp_path):
+    """The exact invocations canary.yml runs: none may exit UNPARSEABLE."""
+    d = HOSTS / MAIN
+    assert rg.main(["host-plan", "--plugin-api-manifest", str(d / "ocs_plugin_api-Cargo.toml"),
+                    "--host-manifest", str(d / "Cargo.toml"),
+                    "--host-lock", str(d / "Cargo.lock")]) == rg.OK
+    assert rg.main(["gate-acadrust", "--host-lock", str(d / "Cargo.lock"),
+                    "--our-manifest", str(REPO / "Cargo.toml"),
+                    "--our-lock", str(REPO / "Cargo.lock"), "--tag", "main"]) == rg.ESCALATE
+    assert rg.main(["gate-api", "--manifest-rs", str(d / "manifest.rs"),
+                    "--plugin-toml", str(REPO / "plugin.toml"), "--tag", "main"]) == rg.OK
