@@ -18,6 +18,10 @@ gates was an upstream respelling that only a red nightly run could find:
               git = ".../opencadcodec.git", rev = "..." }, imported under the
               key `codec`. Every gate now finds "the codec" by package name
               (acadrust or opencadcodec) under whatever key declares it.
+    main (post-v2026.43)  codec = { package = "opencaddocument", ... }: a NEW
+              crate, a facade that re-exports all of acadrust and wraps
+              CadDocument as `Document`. Its lockfile carries both packages,
+              opencaddocument depending on acadrust; the facade is the codec.
 
 Each of those tags is a fixture under tests/fixtures/host/, asserted in
 tests/test_repin_gates.py. The rule that stops the cycle: a shape that breaks a
@@ -56,8 +60,10 @@ class Unparseable(Exception):
 # package at v2026.39 (acadrust -> opencadcodec) and imports it under the key
 # `codec`, so the dependency KEY says nothing; only the package name identifies
 # it. A rename between the host and us is a source migration (every `use`
-# changes), never a pin bump.
-CODEC_PACKAGES = ("acadrust", "opencadcodec")
+# changes), never a pin bump. opencaddocument (upstream main after v2026.43) is
+# a facade over acadrust rather than a rename of it; see locked_codec.
+CODEC_PACKAGES = ("acadrust", "opencadcodec", "opencaddocument")
+CODEC_NAMES = " / ".join(CODEC_PACKAGES)
 
 # ----------------------------------------------------------------- lockfiles
 
@@ -86,14 +92,21 @@ def locked_package(lock_text: str, name: str) -> dict:
 def locked_codec(lock_text: str) -> dict:
     """The single locked codec package, whichever name it goes by.
 
-    Both names in one lockfile is two codecs in one graph — the same ABI
-    failure as two builds of one name, so it escalates the same way.
+    Two codec names in one lockfile is two codecs in one graph — the same ABI
+    failure as two builds of one name, so it escalates the same way. The one
+    exception is a facade: opencaddocument depends on acadrust and re-exports
+    it, so a codec that another locked codec depends on is wrapped, not a
+    second codec. The facade is what crosses the plugin boundary, and pinning
+    its rev pins the acadrust beneath it.
     """
     doc = tomllib.loads(lock_text)
-    names = sorted({p.get("name") for p in doc.get("package", [])
-                    if p.get("name") in CODEC_PACKAGES})
+    codecs = {p.get("name"): p for p in doc.get("package", [])
+              if p.get("name") in CODEC_PACKAGES}
+    wrapped = {dep.split()[0] for p in codecs.values()
+               for dep in p.get("dependencies", [])} & codecs.keys()
+    names = sorted(codecs.keys() - wrapped)
     if not names:
-        raise Unparseable(f"no codec package ({' / '.join(CODEC_PACKAGES)}) in the lockfile")
+        raise Unparseable(f"no codec package ({CODEC_NAMES}) in the lockfile")
     if len(names) > 1:
         raise Escalate(
             f"the lockfile carries both {' and '.join(names)}: two CAD codecs in one "
@@ -132,7 +145,7 @@ def linked_codec(plugin_api_manifest: str) -> tuple[str, str, str]:
     """(package, url, rev) of the codec exactly as ocs_plugin_api declares it."""
     found = codec_dep(plugin_api_manifest)
     if found is None:
-        raise Unparseable("no codec dependency (acadrust / opencadcodec) in "
+        raise Unparseable(f"no codec dependency ({CODEC_NAMES}) in "
                           "ocs_plugin_api's [dependencies]")
     _, package, dep = found
     kind, value = dep_kind(dep, package)
@@ -327,7 +340,7 @@ def effective_acadrust(manifest_text: str) -> tuple[str, str]:
     """The acadrust source a manifest resolves to, its own `[patch]` applied."""
     found = codec_dep(manifest_text)
     if found is None:
-        raise Unparseable("no codec dependency (acadrust / opencadcodec) in the manifest")
+        raise Unparseable(f"no codec dependency ({CODEC_NAMES}) in the manifest")
     kind, value = dep_kind(found[2], found[1])
     if kind != "git":
         raise Unparseable("an effective git source is only defined for a git pin")
@@ -410,12 +423,12 @@ def gate_acadrust(host_lock: str, our_manifest: str, our_lock: str | None = None
 
     found = codec_dep(our_manifest)
     if found is None:
-        raise Unparseable("no codec dependency (acadrust / opencadcodec) in the plugin manifest")
+        raise Unparseable(f"no codec dependency ({CODEC_NAMES}) in the plugin manifest")
     _, our_package, dep = found
     if our_package != host["name"]:
         raise Escalate(
             f"host {tag} ships the CAD codec as the {host['name']} package; we are "
-            f"built against {our_package}. A package rename changes every `use` in "
+            f"built against {our_package}. A codec package change rewrites every `use` in "
             "the plugin — a source migration, not a re-pin."
         )
     kind, value = dep_kind(dep, our_package)
@@ -476,7 +489,7 @@ def gate_source_identity(our_manifest: str, plugin_api_manifest: str,
     want_package, want_url, want_rev = linked_codec(plugin_api_manifest)
     found = codec_dep(our_manifest)
     if found is None:
-        raise Unparseable("no codec dependency (acadrust / opencadcodec) in the plugin manifest")
+        raise Unparseable(f"no codec dependency ({CODEC_NAMES}) in the plugin manifest")
     _, our_package, dep = found
     if our_package != want_package:
         raise Escalate(
@@ -758,7 +771,7 @@ def main(argv: list[str] | None = None) -> int:
             report = {"current_pin": current_host_pin(cargo)}
             found = codec_dep(cargo)
             if found is None:
-                raise Unparseable("no codec dependency (acadrust / opencadcodec) in Cargo.toml")
+                raise Unparseable(f"no codec dependency ({CODEC_NAMES}) in Cargo.toml")
             kind, value = dep_kind(found[2], found[1])
             report["current_codec_package"] = found[1]
             if kind == "git":

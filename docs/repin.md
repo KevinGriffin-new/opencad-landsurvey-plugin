@@ -111,6 +111,7 @@ dependency five times in seven weeks:
 | v0.9.5 | `{ git = ".../cadcodec.git", rev = "...", features = [...] }`, no patch |
 | v0.9.8 | same shape, but the root adds `[patch."…/cadcodec.git"]` redirecting it to `https://git@…/cadcodec.git` at another rev |
 | v2026.39 | the package is **renamed**: `codec = { package = "opencadcodec", git = ".../opencadcodec.git", rev = "..." }` |
+| main after v2026.43 | `codec = { package = "opencaddocument", ... }`: a new **facade** crate that depends on acadrust and re-exports it, wrapping `CadDocument` as `Document`; the lockfile carries both |
 
 Each change broke a gate, and each break was found by a red nightly run — the
 v0.9.5 one blocked nine consecutive nights. The v2026.39 rename blocked every
@@ -119,7 +120,7 @@ dependency key `acadrust` and found nothing (exit 2, a parser gap). They now
 identify the codec by **package name** (`acadrust` or `opencadcodec`) under
 whatever key declares it, and treat a rename between the host and the plugin
 as an escalation (exit 1): a rename changes every `use` in the plugin, so it
-is a source migration, never a pin bump. Plugin 0.4.20 is that migration. v0.9.8 is the one that got through
+is a source migration, never a pin bump. Plugin 0.4.20 is that migration. The opencaddocument facade (canary #71) is read the same way: a codec locked as a dependency of another codec is wrapped by it, so the facade is the codec, and a plugin still on acadrust escalates rather than failing to parse. v0.9.8 is the one that got through
 the parsers entirely: it broke no reader, it just made every reader answer a
 question that had stopped being the right one. The gates were fixed reactively
 three times because the logic lived in heredocs inside the workflow, where it
