@@ -58,7 +58,21 @@ def select_release_run(runs, jobs_by_run, asset_uploaded_at):
         if not parse_time(run["created_at"]) <= uploaded <= parse_time(run["updated_at"]):
             continue
         jobs = {j["name"]: j["conclusion"] for j in jobs_by_run[run["id"]]}
-        for job in ("native / build-windows", "native / verify"):
+        if "native / build-windows" in jobs:
+            required = ("native / build-windows", "native / verify")
+        else:
+            # Since v2026.44 the release workflow runs one job per platform,
+            # e.g. "build-windows (x86_64, x86_64-pc-windows-msvc, x64)", and
+            # its "verify" is skipped whenever ANY platform fails (v2026.44's
+            # macOS x86_64 and snap did). Only the build that produced the
+            # asset we record has to have passed; a verify that ran and
+            # failed still sinks the run.
+            required = tuple(name for name in jobs if name.startswith("build-windows (x86_64")) \
+                or ("build-windows (x86_64",)
+            if jobs.get("verify") == "failure":
+                raise ValueError(f"Release run {run['id']} uploaded the Windows asset but its 'verify' job "
+                                 "failed; verify artifact provenance manually")
+        for job in required:
             if jobs.get(job) != "success":
                 raise ValueError(f"Release run {run['id']} uploaded the Windows asset but its '{job}' job "
                                  f"concluded {jobs.get(job)!r}; verify artifact provenance manually")

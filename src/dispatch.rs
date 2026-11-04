@@ -3468,7 +3468,7 @@ fn place(host: &mut dyn HostApi, mut ent: EntityType, layer: &str, source: &str)
 mod tests {
     use super::*;
     use codec::tables::{AppId, TableEntry};
-    use codec::{CadDocument, DwgReader, DwgWriter};
+    use codec::{Document, DwgReader, DwgWriter};
     use landsurvey::alignment;
     use std::io::Cursor;
 
@@ -3477,7 +3477,7 @@ mod tests {
     /// Interactive/state/reader surfaces are unreachable from those paths and
     /// panic if hit.
     struct TestHost {
-        doc: CadDocument,
+        doc: Document,
         log: Vec<String>,
         /// Calls to `add_entity` / `add_entities`, for the batching tests.
         single_adds: usize,
@@ -3499,7 +3499,7 @@ mod tests {
     impl TestHost {
         fn new() -> Self {
             TestHost {
-                doc: CadDocument::default(),
+                doc: Document::default(),
                 log: Vec::new(),
                 single_adds: 0,
                 bulk_adds: 0,
@@ -3529,10 +3529,10 @@ mod tests {
         fn tab_index(&self) -> usize {
             0
         }
-        fn document(&self) -> &CadDocument {
+        fn document(&self) -> &Document {
             &self.doc
         }
-        fn document_mut(&mut self) -> &mut CadDocument {
+        fn document_mut(&mut self) -> &mut Document {
             &mut self.doc
         }
         fn add_entity(&mut self, entity: EntityType) -> codec::Handle {
@@ -4251,7 +4251,7 @@ mod tests {
     /// `ensure_app_id` does on `write_record` (OCS #249). A standalone test
     /// document has no host, so the writer needs this done by hand for the
     /// EED app references to resolve.
-    fn register_ls_app_ids(doc: &mut CadDocument) {
+    fn register_ls_app_ids(doc: &mut Document) {
         for name in [XDATA_POINT, XDATA_PLAN, XDATA_SURFACE, XDATA_PARCEL, XDATA_FEATURE, XDATA_FIGURE, XDATA_SYMBOL, XDATA_LABEL] {
             if !doc.app_ids.contains(name) {
                 let mut app = AppId::new(name);
@@ -5021,7 +5021,7 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
     /// registered layer survives the round-trip.
     #[test]
     fn stock_records_and_registered_layer_roundtrip() {
-        let mut doc = CadDocument::default();
+        let mut doc = Document::default();
         register_ls_app_ids(&mut doc);
         let mut pt = EntityType::Point(CadPoint::at(Vector3::new(5000.0, 4000.0, 101.5)));
         pt.common_mut().layer = "LS-PT-IP".to_string();
@@ -5081,8 +5081,8 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         ent.common_mut().extended_data.add_record(rec);
     }
 
-    fn doc_with_tagged_mesh(name: &str) -> CadDocument {
-        let mut doc = CadDocument::default();
+    fn doc_with_tagged_mesh(name: &str) -> Document {
+        let mut doc = Document::default();
         let mut ent = EntityType::Mesh(mesh_from_surface(&sample_surface()));
         ent.common_mut().layer = format!("LS-TIN-{name}");
         tag(&mut ent, name, "TIN");
@@ -5113,7 +5113,7 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         // Draw the sample surface the way LS_SURFACE / draw_tin does: one
         // tagged Line per unique TIN edge.
         let surf = sample_surface();
-        let mut doc = CadDocument::default();
+        let mut doc = Document::default();
         for e in surf.edges() {
             let a = surf.nodes[e[0]];
             let b = surf.nodes[e[1]];

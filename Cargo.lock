@@ -4,8 +4,8 @@ version = 4
 
 [[package]]
 name = "acadrust"
-version = "0.6.6"
-source = "git+https://github.com/HakanSeven12/opencadcodec.git?rev=24b037a#24b037af9d1490b83464e5d43b14a7f4d12744e8"
+version = "0.6.8"
+source = "git+https://github.com/HakanSeven12/acadrust.git?rev=53e6420#53e6420c4df4d207409798c2719d32fc6cf2811d"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -15,6 +15,7 @@ dependencies = [
  "foldhash",
  "indexmap",
  "itoa",
+ "memchr",
  "memmap2",
  "nom",
  "oem_cp",
@@ -544,15 +545,15 @@ dependencies = [
 [[package]]
 name = "ocs_plugin_api"
 version = "0.2.1"
-source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=dbd50b20091cf6ce9cf61967ae0563df04014f5a#dbd50b20091cf6ce9cf61967ae0563df04014f5a"
+source = "git+https://github.com/HakanSeven12/OpenCADStudio?rev=0e77cae652271d08c7619238e619f9b6668ae17c#0e77cae652271d08c7619238e619f9b6668ae17c"
 dependencies = [
- "acadrust",
  "bincode",
  "cargo-lock",
  "getrandom",
  "interprocess",
  "libloading",
  "memmap2",
+ "opencaddocument",
  "rkyv",
  "serde",
  "serde-reflection",
@@ -578,11 +579,20 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "opencad-landsurvey-plugin"
-version = "0.4.25"
+version = "0.4.26"
 dependencies = [
- "acadrust",
  "landsurvey",
  "ocs_plugin_api",
+ "opencaddocument",
+]
+
+[[package]]
+name = "opencaddocument"
+version = "0.1.0"
+source = "git+https://github.com/HakanSeven12/opencaddocument.git?rev=d657f94#d657f945f9d39e00548c76a8f52424881feeed1d"
+dependencies = [
+ "acadrust",
+ "serde",
 ]
 
 [[package]]
