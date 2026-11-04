@@ -35,9 +35,9 @@ def test_generated_manifest_uses_resolved_source():
     host = json.loads((ROOT / "host-build.json").read_text())
     result = tomllib.loads(generate(ROOT, host["rustc_version"]))
     # The host keeps the key `acadrust_source`; its value is the codec package's
-    # source, whichever name the codec goes by (opencadcodec since v2026.39).
+    # source, whichever name the codec goes by (opencaddocument since v2026.44).
     source = gates.locked_codec((ROOT / "Cargo.lock").read_text())["source"]
-    assert "opencadcodec" in source
+    assert "opencaddocument" in source
     assert result["opencad"]["acadrust_source"] == source
     assert result["opencad"]["rustc_version"] == host["rustc_version"]
 
@@ -114,6 +114,26 @@ def test_release_run_rejected_when_native_jobs_failed():
     jobs = {1: _jobs(native__build_windows="success", native__verify="failure")}
     with pytest.raises(ValueError, match="native / verify"):
         select_release_run(runs, jobs, "2026-09-13T16:13:52Z")
+
+
+def test_release_run_per_platform_jobs_need_only_the_windows_build():
+    # v2026.44: per-platform jobs; macOS x86_64 and snap failed, so verify
+    # was skipped, but the Windows x86_64 build that uploaded the asset passed.
+    runs = [_run(41415311737, "Release", "2026-11-02T08:44:55Z", "2026-11-02T09:21:24Z")]
+    jobs = {41415311737: [
+        {"name": "build-windows (x86_64, x86_64-pc-windows-msvc, x64)", "conclusion": "success"},
+        {"name": "build-macos (x86_64, x86_64-apple-darwin, x86_64-apple-macos11)", "conclusion": "failure"},
+        {"name": "build-snap", "conclusion": "failure"},
+        {"name": "verify", "conclusion": "skipped"}]}
+    assert select_release_run(runs, jobs, "2026-11-02T09:20:19Z")["id"] == 41415311737
+
+
+def test_release_run_per_platform_rejected_when_windows_build_failed():
+    runs = [_run(1, "Release", "2026-11-02T08:44:55Z", "2026-11-02T09:21:24Z")]
+    jobs = {1: [{"name": "build-windows (x86_64, x86_64-pc-windows-msvc, x64)", "conclusion": "failure"},
+                {"name": "verify", "conclusion": "skipped"}]}
+    with pytest.raises(ValueError, match="build-windows"):
+        select_release_run(runs, jobs, "2026-11-02T09:20:19Z")
 
 
 def test_release_run_missing_when_no_run_spans_the_upload():
