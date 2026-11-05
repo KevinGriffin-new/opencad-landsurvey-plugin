@@ -7,6 +7,7 @@
 
 pub mod alignment;
 pub mod cogo;
+pub mod contours;
 pub mod dxf;
 pub mod finish;
 pub mod label_style;

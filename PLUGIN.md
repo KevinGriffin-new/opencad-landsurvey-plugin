@@ -19,6 +19,7 @@ dependency; a headless `landsurvey-cli` exercises the same engine and dumps DXF.
 | `LS_LANDXMLOUT <path> [points] [parcels] [features] [surfaces] [alignments] [metric\|imperial]` | ribbon (prints usage) / command line | Export LandXML 1.2 from what is drawn now. **Points:** Land Survey points; the code is the description's first word. **Parcels:** tagged parcels, plus any closed LWPolyline on a layer containing PARCEL, LOT, PROPERTY or BOUNDARY, named `Parcel <n>`. Bulges become `<Curve>`s, the area is computed from the boundary, and `<Center>` is where the lot's name label now sits, or the area centroid. **Features:** tagged plan features. **Surfaces:** every named TIN. **Alignments:** each centreline, with lines, arcs and `<Spiral>`s with a computed PI; spirals off a tangent also get tangent lengths. Its profiles and cross sections are read back from their views, so edits to the drawn PVI line or sections export. Units default to those of the last `LS_LANDXML` import, else metric. |
 | `LS_VOLUME [<top> <bottom>] [grid] [draw]` | ribbon / command line | Earthwork cut/fill/net between two surfaces (by name — defaults to `top`/`bottom` — or file paths). Exact TIN overlay; optional grid method and drawn TINs + cut/fill line + label. |
 | `LS_DATUM <surface> <elev>` | command line | Cut/fill of one surface vs a horizontal datum, with the datum contour and a label. |
+| `LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]` | command line | Generate 3D contour polylines from a named TIN surface. Minor contours use `LS-CONTOUR-MIN`; every `major-every`-th interval uses `LS-CONTOUR-MAJ`. Re-running replaces contours belonging to that surface. |
 | `LS_RTS <baseN> <baseE> <rot> <scale> [<toN> <toE>]` | command line | Rotate / Translate / Scale every entity about a base point. |
 | `LS_HELMERT <pairs> [apply\|stages\|anim\|teach]` | ribbon file dialog / command line | Least-squares 2-D conformal fit from control pairs (`srcN,srcE,dstN,dstE`); prints a 7-step report. `stages` draws the annotated transform stages; `apply` transforms the drawing; `anim`/`teach` export an animated-SVG explainer (`teach` amplifies near-grid fits). |
 | `LS_RESECT <shots>` | ribbon file dialog / command line | Free-station resection: solve the occupied (unknown) point from shots to known control (`knownN, knownE, direction_deg[, distance][, name]`). Combined (direction + distance, least-squares, EDM scale check) with ≥2 distance shots, else angle-only three-point (Tienstra, danger-circle guard) for 3 angle shots. Draws the station, rays to each known point, and a label on `LS-RESECT-STATION/KNOWN/RAYS/LABEL`. |
@@ -35,6 +36,46 @@ dependency; a headless `landsurvey-cli` exercises the same engine and dumps DXF.
 The file-dialog commands fire `ModuleEvent::PluginFileDialog`, so the host opens
 a native file picker and dispatches `"<command> <path>"` back with the path's
 original case preserved.
+
+## TIN contours (`LS_CONTOURS`)
+
+Syntax:
+
+```text
+LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]
+```
+
+For example, `LS_CONTOURS EG 0.5 5` generates contours for the
+named TIN surface `EG` at elevation intervals of 0.5 drawing units.
+Every fifth interval is a major contour. The interval must be positive
+and finite, and `major-every` must be a positive integer.
+
+The output consists of 3D polylines with nominal contour elevations
+as their Z coordinates. Major contours use `LS-CONTOUR-MAJ`;
+minor contours use `LS-CONTOUR-MIN`. Each contour carries the
+`LANDSURVEY_SURFACE` XDATA record with the surface name, kind
+`CONTOUR`, and an additional elevation string.
+
+Regeneration is surface-specific: the command builds the new geometry
+before replacing existing contours tagged for that surface. An error
+during contour calculation leaves the drawing unchanged; incomplete
+entity insertion attempts to remove newly inserted entities while
+preserving existing contours. If deletion of old entities fails, the
+command reports the incomplete replacement so the user can review
+duplicates and use Undo if necessary.
+
+Contour endpoints are connected by shared TIN edge identifiers rather
+than by approximate XY coordinates. If the requested contour elevation
+exactly equals a TIN vertex elevation, the algorithm samples one
+representable floating-point elevation above it to avoid ambiguous
+vertex intersections. The resulting contour retains the requested
+nominal Z value; this is a topological convention rather than an
+exact-coordinate slice through the vertex.
+
+The command rejects non-manifold TIN edges shared by more than two
+triangles and contour topologies where more than two segments meet at
+one crossing. It also rejects invalid intervals, non-finite TIN nodes,
+and elevation ranges exceeding 10,000 intervals.
 
 ## XDATA
 
