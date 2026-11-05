@@ -26,8 +26,9 @@ name: release
 #                    workflow directly instead of relying on the tag event.
 #                    The caller must pass `secrets: inherit` for macOS signing.
 #   workflow_dispatch — rebuild an existing tag by hand. With `dry_run` it
-#                    builds, signs and notarizes but publishes nothing, which is
-#                    how to exercise the signing path without cutting a release.
+#                    builds, signs, notarizes, verifies and packages the tarballs
+#                    but publishes nothing — a full rehearsal of the release, the
+#                    packager assets included, without cutting one.
 #
 # macOS: the dylib is signed with the Developer ID and notarized. A Developer
 # ID-signed Open CAD Studio runs with the hardened runtime, whose library
@@ -243,9 +244,9 @@ jobs:
 
   publish:
     needs: build
-    # `inputs.dry_run` is null on push and workflow_call, so only a dispatched
-    # dry run skips publishing.
-    if: ${{ !inputs.dry_run }}
+    # Runs on every build, including a dispatched dry run, so the dry run
+    # rehearses the whole download -> verify -> package pipeline. Only the final
+    # upload is gated (below): a dry run stops short of creating the Release.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -300,7 +301,17 @@ jobs:
           sha256sum opencad.landsurvey-*.tar.gz > SHA256SUMS
           echo "--- dist now carries ---"; ls -1 *.tar.gz *.tar.gz.sha256 SHA256SUMS
 
-      - uses: softprops/action-gh-release@v3
+      - name: Publish the GitHub Release
+        # `inputs.dry_run` is empty on push and workflow_call, so this runs for
+        # every real release; only a dispatched dry run skips the upload.
+        if: ${{ !inputs.dry_run }}
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*
+
+      - name: Note the dry run published nothing
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "::notice::dry run — built, signed, verified and packaged, but published nothing."
+          { echo "### Dry run"; echo "Built, signed, notarized, verified and packaged (tarballs + sha256). No Release created."; } >> "$GITHUB_STEP_SUMMARY"
