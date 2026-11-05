@@ -29,6 +29,43 @@ pub enum ContourError {
     BranchingTopology,
 }
 
+impl std::fmt::Display for ContourError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidLevel => write!(
+                f,
+                "invalid contour elevation: the level must be finite"
+            ),
+            Self::NonManifoldEdge => write!(
+                f,
+                "non-manifold TIN: an edge is shared by more than two triangles; check the triangulation"
+            ),
+            Self::BranchingTopology => write!(
+                f,
+                "invalid contour topology: more than two contour segments meet at one TIN edge"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ContourError {}
+
+#[cfg(test)]
+mod contour_error_display_tests {
+    use super::ContourError;
+
+    #[test]
+    fn messages_are_human_readable() {
+        assert!(ContourError::InvalidLevel.to_string().contains("finite"));
+        assert!(ContourError::NonManifoldEdge
+            .to_string()
+            .contains("more than two triangles"));
+        assert!(ContourError::BranchingTopology
+            .to_string()
+            .contains("more than two contour segments"));
+    }
+}
+
 /// Slice a TIN at one nominal level, connecting pieces by their shared edge IDs.
 ///
 /// For a level coincident with a TIN vertex, slicing occurs at `level.next_up()`;

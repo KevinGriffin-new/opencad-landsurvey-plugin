@@ -1799,7 +1799,7 @@ fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
         let chains = match landsurvey::contours::contours_at_level(&surface, level) {
             Ok(chains) => chains,
             Err(err) => {
-                host.push_error(&format!("LS_CONTOURS: contour geometry error at {level}: {err:?}; drawing unchanged"));
+                host.push_error(&format!("LS_CONTOURS: contour geometry error at {level}: {err}; drawing unchanged"));
                 return;
             }
         };
@@ -5222,7 +5222,7 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
 
     #[test]
     fn contour_replacement_targets_only_own_surface() {
-        let mut doc = CadDocument::default();
+        let mut doc = codec::Document::default();
         for (name, kind, layer) in [
             ("EG", "CONTOUR", "LS-CONTOUR-MIN"),
             ("eg", "CONTOUR", "LS-CONTOUR-MAJ"),
