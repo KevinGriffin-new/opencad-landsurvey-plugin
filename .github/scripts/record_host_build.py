@@ -58,19 +58,23 @@ def select_release_run(runs, jobs_by_run, asset_uploaded_at):
         if not parse_time(run["created_at"]) <= uploaded <= parse_time(run["updated_at"]):
             continue
         jobs = {j["name"]: j["conclusion"] for j in jobs_by_run[run["id"]]}
-        if "native / build-windows" in jobs:
-            required = ("native / build-windows", "native / verify")
+        # Upstream has spelled the Windows build three ways: "native /
+        # build-windows" (to v2026.43), "build-windows (x86_64, ...)"
+        # (v2026.44) and "native / build-windows (x86_64, ...)" (v2026.45).
+        # Match on the name with any "native / " prefix removed.
+        bare = {name.removeprefix("native / "): name for name in jobs}
+        if "build-windows" in bare:
+            required = (bare["build-windows"], bare.get("verify", "native / verify"))
         else:
-            # Since v2026.44 the release workflow runs one job per platform,
-            # e.g. "build-windows (x86_64, x86_64-pc-windows-msvc, x64)", and
-            # its "verify" is skipped whenever ANY platform fails (v2026.44's
-            # macOS x86_64 and snap did). Only the build that produced the
-            # asset we record has to have passed; a verify that ran and
-            # failed still sinks the run.
-            required = tuple(name for name in jobs if name.startswith("build-windows (x86_64")) \
+            # One job per platform. Its "verify" is skipped whenever ANY
+            # platform fails (v2026.44's macOS x86_64 and snap did). Only the
+            # build that produced the asset we record has to have passed; a
+            # verify that ran and failed still sinks the run.
+            required = tuple(name for b, name in bare.items() if b.startswith("build-windows (x86_64")) \
                 or ("build-windows (x86_64",)
-            if jobs.get("verify") == "failure":
-                raise ValueError(f"Release run {run['id']} uploaded the Windows asset but its 'verify' job "
+            verify = bare.get("verify")
+            if verify is not None and jobs[verify] == "failure":
+                raise ValueError(f"Release run {run['id']} uploaded the Windows asset but its '{verify}' job "
                                  "failed; verify artifact provenance manually")
         for job in required:
             if jobs.get(job) != "success":
