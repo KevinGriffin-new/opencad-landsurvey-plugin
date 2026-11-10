@@ -128,6 +128,27 @@ def test_release_run_per_platform_jobs_need_only_the_windows_build():
     assert select_release_run(runs, jobs, "2026-11-02T09:20:19Z")["id"] == 41415311737
 
 
+def test_release_run_per_platform_jobs_under_the_native_prefix():
+    # v2026.45: per-platform jobs again carry the "native / " prefix.
+    runs = [_run(42506695608, "Weekly release", "2026-11-08T17:47:21Z", "2026-11-08T18:32:49Z")]
+    jobs = {42506695608: [
+        {"name": "prepare", "conclusion": "success"},
+        {"name": "native / build-windows (arm64, aarch64-pc-windows-msvc, arm64)", "conclusion": "success"},
+        {"name": "native / build-windows (x86_64, x86_64-pc-windows-msvc, x64)", "conclusion": "success"},
+        {"name": "native / build-snap", "conclusion": "success"},
+        {"name": "web / build", "conclusion": "success"},
+        {"name": "native / verify", "conclusion": "success"}]}
+    assert select_release_run(runs, jobs, "2026-11-08T18:23:06Z")["id"] == 42506695608
+
+
+def test_release_run_native_prefix_rejected_when_verify_failed():
+    runs = [_run(1, "Weekly release", "2026-11-08T17:47:21Z", "2026-11-08T18:32:49Z")]
+    jobs = {1: [{"name": "native / build-windows (x86_64, x86_64-pc-windows-msvc, x64)", "conclusion": "success"},
+                {"name": "native / verify", "conclusion": "failure"}]}
+    with pytest.raises(ValueError, match="native / verify"):
+        select_release_run(runs, jobs, "2026-11-08T18:23:06Z")
+
+
 def test_release_run_per_platform_rejected_when_windows_build_failed():
     runs = [_run(1, "Release", "2026-11-02T08:44:55Z", "2026-11-02T09:21:24Z")]
     jobs = {1: [{"name": "build-windows (x86_64, x86_64-pc-windows-msvc, x64)", "conclusion": "failure"},
