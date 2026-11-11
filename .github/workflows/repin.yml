@@ -237,6 +237,15 @@ jobs:
         run: |
           python3 "$GATES" gate-abi --host-rev "${{ steps.acadver.outputs.host_rev }}"
 
+      # ci.yml runs these on every PR, but this job merges with GITHUB_TOKEN,
+      # which triggers no workflows, so the bot's own PR is never tested by CI.
+      # v0.4.28 shipped with a gate test failing on main for that reason. Run
+      # them here, against the rewritten pins, before anything is merged.
+      - name: Unit-test the gates against the rewritten pins
+        run: |
+          python -m pip install --quiet pytest
+          python -m pytest .github/scripts/tests -q
+
       - name: Verify published host compiler before building
         run: python3 .github/scripts/build_metadata.py
 
