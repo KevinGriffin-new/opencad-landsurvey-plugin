@@ -459,22 +459,21 @@ def tag_order(tag: str) -> tuple[float, ...]:
 
 
 def shipped_host_tag() -> str:
-    """The corpus tag whose ocs_plugin_api matches the acadrust we declare.
+    """The corpus tag of the host we are pinned to, read from host-build.json.
 
     Hardcoding a tag here goes stale the first time the re-pin ships: the tests
     then compare what we ship against a host we no longer pin, and start passing
-    or failing for reasons unrelated to what they assert. A mechanical re-pin to
-    a release nobody had to debug leaves no fixture behind — that is the ratchet
+    or failing for reasons unrelated to what they assert. Matching on the codec
+    alone is stale the same way: a re-pin that keeps the codec but raises the
+    API window would resolve to the previous host. A mechanical re-pin to a
+    release nobody had to debug leaves no fixture behind — that is the ratchet
     working as intended — so not finding one is a skip, not a failure.
     """
-    ours = rg.effective_acadrust((REPO / "Cargo.toml").read_text(encoding="utf-8"))
-    for tag in sorted([*TAGS, *CODEC_TAGS], key=tag_order, reverse=True):
-        try:
-            if rg.linked_acadrust(plugin_api(tag)) == ours:
-                return tag
-        except (rg.Escalate, rg.Unparseable):
-            continue
-    pytest.skip("the host we ship is newer than the vendored corpus")
+    import json
+    tag = json.loads((REPO / "host-build.json").read_text(encoding="utf-8"))["tag"]
+    if tag in {*TAGS, *CODEC_TAGS} and (HOSTS / tag).is_dir():
+        return tag
+    pytest.skip(f"the host we ship ({tag}) is not in the vendored corpus")
 
 
 @pytest.mark.parametrize("tag", ["v0.8.1", "v0.8.2", "v0.8.7", "v0.8.8", "v0.9.4"])
