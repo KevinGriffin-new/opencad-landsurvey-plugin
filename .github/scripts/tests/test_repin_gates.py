@@ -85,6 +85,10 @@ CODEC_TAGS = {
     # plugin moved to it in v0.4.26 (#74).
     "v2026.44": ("opencaddocument", "0.1.0", "github.com/HakanSeven12/opencaddocument",
                  "d657f945f9d39e00548c76a8f52424881feeed1d"),
+    # acadrust now comes from hakanaktt/acadrust (the HakanSeven12 repository
+    # was deleted); Plugin API 16. The plugin moved to it in v0.4.28 (#81).
+    "v2026.45": ("opencaddocument", "0.1.0", "github.com/HakanSeven12/opencaddocument",
+                 "b9e1762969f3897e67e1801a2199445b6cf83b5d"),
 }
 
 # How each tag spells [dependencies].acadrust in its Cargo.toml. The v0.8.8 row
@@ -108,6 +112,7 @@ MANIFEST_SHAPES = {
     "v2026.43": "git",
     "main-7c5594c": "git",
     "v2026.44": "git",
+    "v2026.45": "git",
 }
 
 API_WINDOWS = {
@@ -128,6 +133,7 @@ API_WINDOWS = {
     "v2026.43": (3, 13),
     "main-7c5594c": (3, 13),
     "v2026.44": (3, 14),
+    "v2026.45": (3, 16),
 }
 
 
@@ -894,13 +900,15 @@ def test_shipped_plugin_escalates_on_a_host_back_on_acadrust():
 
 def test_canary_commands_read_the_facade(tmp_path):
     """The exact invocations canary.yml runs: none may exit UNPARSEABLE.
-    Run against v2026.44, the first facade host that also accepts API 14."""
-    d = HOSTS / "v2026.44"
+    Run against the host we ship on, never a hardcoded tag: a fixed tag goes
+    stale at the next re-pin (v2026.44 caps the API at 14; v0.4.28 declares 16)."""
+    tag = shipped_host_tag()
+    d = HOSTS / tag
     assert rg.main(["host-plan", "--plugin-api-manifest", str(d / "ocs_plugin_api-Cargo.toml"),
                     "--host-manifest", str(d / "Cargo.toml"),
                     "--host-lock", str(d / "Cargo.lock")]) == rg.OK
     assert rg.main(["gate-acadrust", "--host-lock", str(d / "Cargo.lock"),
                     "--our-manifest", str(REPO / "Cargo.toml"),
-                    "--our-lock", str(REPO / "Cargo.lock"), "--tag", "v2026.44"]) == rg.OK
+                    "--our-lock", str(REPO / "Cargo.lock"), "--tag", tag]) == rg.OK
     assert rg.main(["gate-api", "--manifest-rs", str(d / "manifest.rs"),
-                    "--plugin-toml", str(REPO / "plugin.toml"), "--tag", "v2026.44"]) == rg.OK
+                    "--plugin-toml", str(REPO / "plugin.toml"), "--tag", tag]) == rg.OK
