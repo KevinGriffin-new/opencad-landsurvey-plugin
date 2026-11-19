@@ -195,8 +195,10 @@ jobs:
           ZIP="$RUNNER_TEMP/notarize.zip"
           ditto -c -k --norsrc --noextattr "dist/${{ matrix.asset }}" "$ZIP"
           xcrun notarytool submit "$ZIP" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
-            --password "$APPLE_APP_PASSWORD" --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json" || true
+            --password "$APPLE_APP_PASSWORD" --wait --timeout 30m --output-format json \
+            > "$RUNNER_TEMP/notary.json" 2> "$RUNNER_TEMP/notary.err" || true
           cat "$RUNNER_TEMP/notary.json"
+          cat "$RUNNER_TEMP/notary.err" >&2
           # Never let a malformed reply skip the error below: print "- -" then.
           read -r ID STATUS < <(python3 -c '
           import json, sys
@@ -212,9 +214,16 @@ jobs:
               xcrun notarytool log "$ID" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" || true
               echo "::error::notarization $STATUS; Apple's log above names the cause"
             else
-              # No submission id: Apple refused the request itself. A 403 here
-              # means the developer agreement needs re-accepting.
-              echo "::error::notarization submission failed; see the reply above"
+              # No submission id: Apple refused the request itself.
+              if grep -qi 'agreement is missing or has expired' "$RUNNER_TEMP/notary.err"; then
+                # Not flaky and not fixable here: every release fails until the
+                # Account Holder accepts the updated Apple Developer Program
+                # License Agreement (developer.apple.com/account). Then rebuild
+                # with: gh workflow run release.yml -f tag=$TAG
+                echo "::error title=Apple developer agreement expired::Apple refused notarization (HTTP 403): the Account Holder must accept the updated agreement at https://developer.apple.com/account, then re-run release.yml for this tag."
+              else
+                echo "::error::notarization submission failed; see the reply above"
+              fi
             fi
             exit 1
           fi
