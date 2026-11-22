@@ -16,16 +16,16 @@ const MINOR_COLOR_ID: &str = "minor_color";
 /// A compact, named ACI palette. The two selectors use this same palette
 /// independently; the index stored in a contour layer remains a CAD ACI color.
 pub const ACI_PALETTE: &[(i16, &str)] = &[
-    (1, "Rojo"),
-    (2, "Amarillo"),
-    (3, "Verde"),
-    (4, "Cian"),
-    (5, "Azul"),
+    (1, "Red"),
+    (2, "Yellow"),
+    (3, "Green"),
+    (4, "Cyan"),
+    (5, "Blue"),
     (6, "Magenta"),
-    (8, "Gris oscuro"),
-    (9, "Gris claro"),
-    (30, "Naranja"),
-    (140, "Azul celeste"),
+    (8, "Dark gray"),
+    (9, "Light gray"),
+    (30, "Orange"),
+    (140, "Sky blue"),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -53,41 +53,41 @@ fn pending() -> &'static Mutex<HashMap<u64, ContourConfig>> {
 
 pub fn build_dialog(surfaces: &[String], error: Option<&str>) -> DialogDef {
     let mut dialog = DialogDef::new("Contour Wizard")
-        .submit_label("Generar")
-        .cancel_label("Cancelar")
+        .submit_label("Generate")
+        .cancel_label("Cancel")
         .width(440.0)
         .with_row(DialogRow::single(DialogControl::Choice {
             id: SURFACE_ID.into(),
-            label: "Superficie TIN".into(),
+            label: "TIN surface".into(),
             options: surfaces.to_vec(),
             default_index: 0,
         }))
         .with_row(DialogRow::new(vec![
             DialogControl::Text {
                 id: INTERVAL_ID.into(),
-                label: "Equidistancia".into(),
+                label: "Minor interval".into(),
                 default: "0.5".into(),
             },
             DialogControl::Text {
                 id: MAJOR_ID.into(),
-                label: "Frecuencia principales".into(),
+                label: "Major every".into(),
                 default: "5".into(),
             },
         ]))
         .with_control(DialogControl::InfoText {
-            text: "Representación de curvas (ACI). Generar cambiará el color de LS-CONTOUR-MAJ y LS-CONTOUR-MIN, conservando sus demás propiedades.".into(),
+            text: "Contour colors (ACI). Generate will change the colors of LS-CONTOUR-MAJ and LS-CONTOUR-MIN while preserving their other properties.".into(),
             align_h: None,
         })
         .with_row(DialogRow::new(vec![
             DialogControl::Choice {
                 id: MAJOR_COLOR_ID.into(),
-                label: "Principales".into(),
+                label: "Major contours".into(),
                 options: palette_options(),
                 default_index: 0,
             },
             DialogControl::Choice {
                 id: MINOR_COLOR_ID.into(),
-                label: "Secundarias".into(),
+                label: "Minor contours".into(),
                 options: palette_options(),
                 default_index: 4,
             },
@@ -117,7 +117,7 @@ pub fn validate_response(
         }
         _ => {
             return Err(ResponseError::Invalid(
-                "Selecciona una superficie TIN válida.".into(),
+                "Select a valid TIN surface.".into(),
             ))
         }
     };
@@ -125,7 +125,7 @@ pub fn validate_response(
         Some(DialogValue::Text(text)) => text.trim(),
         _ => {
             return Err(ResponseError::Invalid(
-                "Equidistancia ausente o con tipo incorrecto.".into(),
+                "Minor interval is missing or has the wrong type.".into(),
             ))
         }
     };
@@ -134,13 +134,13 @@ pub fn validate_response(
         .ok()
         .filter(|v| v.is_finite() && *v > 0.0)
         .ok_or_else(|| {
-            ResponseError::Invalid("La equidistancia debe ser finita y mayor que cero.".into())
+            ResponseError::Invalid("Minor interval must be finite and greater than zero.".into())
         })?;
     let major_text = match values.get(MAJOR_ID) {
         Some(DialogValue::Text(text)) => text.trim(),
         _ => {
             return Err(ResponseError::Invalid(
-                "Frecuencia ausente o con tipo incorrecto.".into(),
+                "Major frequency is missing or has the wrong type.".into(),
             ))
         }
     };
@@ -149,13 +149,13 @@ pub fn validate_response(
         .ok()
         .filter(|v| *v > 0)
         .ok_or_else(|| {
-            ResponseError::Invalid("La frecuencia debe ser un entero positivo.".into())
+            ResponseError::Invalid("Major frequency must be a positive integer.".into())
         })?;
     let major_color = validate_palette_choice(values.get(MAJOR_COLOR_ID)).ok_or_else(|| {
-        ResponseError::Invalid("Selecciona un color ACI válido para curvas principales.".into())
+        ResponseError::Invalid("Select a valid ACI color for major contours.".into())
     })?;
     let minor_color = validate_palette_choice(values.get(MINOR_COLOR_ID)).ok_or_else(|| {
-        ResponseError::Invalid("Selecciona un color ACI válido para curvas secundarias.".into())
+        ResponseError::Invalid("Select a valid ACI color for minor contours.".into())
     })?;
     Ok(ContourConfig {
         surface,
@@ -249,7 +249,7 @@ impl ContourDialogCommand {
 
 impl InteractiveCommand for ContourDialogCommand {
     fn prompt(&self) -> String {
-        "Configurar curvas de nivel".into()
+        "Configure contours".into()
     }
     fn on_point(&mut self, _pt: [f64; 3]) -> CommandStep {
         CommandStep::Cancel
@@ -274,7 +274,7 @@ impl InteractiveCommand for ContourDialogCommand {
                 }
                 None => {
                     self.message =
-                        Some("No se pudo preparar la generación; inténtalo de nuevo.".into());
+                        Some("Could not prepare contour generation; try again.".into());
                     CommandStep::NeedPoint
                 }
             },
@@ -329,8 +329,12 @@ mod tests {
     #[test]
     fn dialog_has_surface_list_and_defaults() {
         let dialog = build_dialog(&surfaces(), None);
-        assert_eq!(dialog.submit_label, "Generar");
-        assert_eq!(dialog.cancel_label, "Cancelar");
+        assert_eq!(dialog.title, "Contour Wizard");
+        assert_eq!(dialog.submit_label, "Generate");
+        assert_eq!(dialog.cancel_label, "Cancel");
+        assert_eq!(ContourDialogCommand::new(surfaces()).prompt(), "Configure contours");
+        assert_eq!(ACI_PALETTE[0], (1, "Red"));
+        assert_eq!(ACI_PALETTE[4], (5, "Blue"));
         let controls: Vec<_> = dialog
             .rows
             .iter()
@@ -340,28 +344,28 @@ mod tests {
         assert_eq!(dialog.rows[1].controls.len(), 2, "numeric fields share a row");
         assert_eq!(dialog.rows[3].controls.len(), 2, "color selectors share a row");
         assert!(controls.iter().any(|control| matches!(control,
-            DialogControl::Choice { id, options, .. }
-                if id == SURFACE_ID && options == &surfaces()
+            DialogControl::Choice { id, label, options, .. }
+                if id == SURFACE_ID && label == "TIN surface" && options == &surfaces()
         )));
         assert!(controls.iter().any(|control| matches!(control,
-            DialogControl::Text { id, default, .. }
-                if id == INTERVAL_ID && default == "0.5"
+            DialogControl::Text { id, label, default, .. }
+                if id == INTERVAL_ID && label == "Minor interval" && default == "0.5"
         )));
         assert!(controls.iter().any(|control| matches!(control,
-            DialogControl::Text { id, default, .. }
-                if id == MAJOR_ID && default == "5"
+            DialogControl::Text { id, label, default, .. }
+                if id == MAJOR_ID && label == "Major every" && default == "5"
         )));
         assert!(controls.iter().any(|control| matches!(control,
-            DialogControl::Choice { id, default_index, options, .. }
-                if id == MAJOR_COLOR_ID && *default_index == 0 && options.len() == ACI_PALETTE.len()
+            DialogControl::Choice { id, label, default_index, options, .. }
+                if id == MAJOR_COLOR_ID && label == "Major contours" && *default_index == 0 && options.len() == ACI_PALETTE.len()
         )));
         assert!(controls.iter().any(|control| matches!(control,
-            DialogControl::Choice { id, default_index, options, .. }
-                if id == MINOR_COLOR_ID && *default_index == 4 && options.len() == ACI_PALETTE.len()
+            DialogControl::Choice { id, label, default_index, options, .. }
+                if id == MINOR_COLOR_ID && label == "Minor contours" && *default_index == 4 && options.len() == ACI_PALETTE.len()
         )));
         assert!(controls.iter().any(|control| matches!(control,
             DialogControl::InfoText { text, .. }
-                if text.contains("Representación de curvas")
+                if text.contains("Contour colors (ACI)")
                     && text.contains("LS-CONTOUR-MAJ")
                     && text.contains("LS-CONTOUR-MIN")
         )));

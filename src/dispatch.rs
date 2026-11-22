@@ -1929,30 +1929,46 @@ fn generate_contours(
 /// Apply only the layer color. Existing linetype, lineweight, visibility,
 /// locking, plottability, transparency, and description remain untouched.
 fn set_contour_layer_colors(host: &mut dyn HostApi, major_aci: i16, minor_aci: i16) -> bool {
-    let major_name = "LS-CONTOUR-MAJ";
-    let minor_name = "LS-CONTOUR-MIN";
-    let previous_major = host.document().layers.get(major_name).map(|layer| layer.color);
-    let previous_minor = host.document().layers.get(minor_name).map(|layer| layer.color);
-    let modify_color = |host: &mut dyn HostApi, name: &str, color| {
-        host.modify_layer(LayerConfig {
+    let layers = [
+        ("LS-CONTOUR-MAJ", major_aci),
+        ("LS-CONTOUR-MIN", minor_aci),
+    ];
+    let mut applied: Vec<(&str, Option<Color>)> = Vec::new();
+    for (name, aci) in layers {
+        let previous = host.document().layers.get(name).map(|layer| layer.color);
+        let config = LayerConfig {
             name: name.to_owned(),
-            color: Some(color),
+            color: Some(Color::from_index(aci)),
             ..LayerConfig::default()
-        })
-    };
-
-    if let Some(_) = previous_major {
-        if !modify_color(host, major_name, Color::from_index(major_aci)) {
-            return false;
-        }
-    }
-    if let Some(_) = previous_minor {
-        if !modify_color(host, minor_name, Color::from_index(minor_aci)) {
-            if let Some(color) = previous_major {
-                let _ = modify_color(host, major_name, color);
+        };
+        let succeeded = if previous.is_some() {
+            host.modify_layer(config)
+        } else {
+            host.add_layer(config).is_some()
+        };
+        if !succeeded {
+            host.push_error(&format!("LS_CONTOURS: could not set the color of layer {name}."));
+            for (applied_name, old_color) in applied.into_iter().rev() {
+                let restored = match old_color {
+                    Some(color) => host.modify_layer(LayerConfig {
+                        name: applied_name.to_owned(),
+                        color: Some(color),
+                        ..LayerConfig::default()
+                    }),
+                    None => host.table_operation(TableOperation::LayerDelete {
+                        name: applied_name.to_owned(),
+                        erase_objects: false,
+                    }).is_ok(),
+                };
+                if !restored {
+                    host.push_error(&format!(
+                        "LS_CONTOURS: could not restore layer {applied_name}; use Undo to review partial color changes."
+                    ));
+                }
             }
             return false;
         }
+        applied.push((name, previous));
     }
     true
 }
@@ -3707,6 +3723,8 @@ mod tests {
         /// Accept only this many items on the next bulk call (simulated partial IPC write).
         bulk_partial_once: Option<usize>,
         blocked_remove: Option<codec::Handle>,
+        blocked_add_layer: Option<String>,
+        blocked_modify_layer: Option<String>,
         /// Answer `add_layer` and `table_operation(BlockCreate)` as the real
         /// host (API v7) does; off, they are refused like the trait defaults.
         scripted: bool,
@@ -3728,6 +3746,8 @@ mod tests {
                 bulk_limit: None,
                 bulk_partial_once: None,
                 blocked_remove: None,
+                blocked_add_layer: None,
+                blocked_modify_layer: None,
                 scripted: false,
                 blocks_created: Vec::new(),
                 selected: Vec::new(),
@@ -3787,7 +3807,8 @@ mod tests {
         }
         fn bump_geometry(&mut self) {}
         fn add_layer(&mut self, config: LayerConfig) -> Option<codec::Handle> {
-            if !self.scripted || self.doc.layers.contains(&config.name) {
+            if !self.scripted || self.doc.layers.contains(&config.name)
+                || self.blocked_add_layer.as_deref() == Some(config.name.as_str()) {
                 return None;
             }
             let mut layer = codec::tables::Layer::new(&config.name);
@@ -3803,6 +3824,9 @@ mod tests {
             Some(handle)
         }
         fn modify_layer(&mut self, config: LayerConfig) -> bool {
+            if self.blocked_modify_layer.as_deref() == Some(config.name.as_str()) {
+                return false;
+            }
             let Some(layer) = self.doc.layers.get_mut(&config.name) else {
                 return false;
             };
@@ -3816,6 +3840,13 @@ mod tests {
         }
         fn table_operation(&mut self, operation: TableOperation) -> Result<codec::Handle, String> {
             match operation {
+                TableOperation::LayerDelete { name, erase_objects: false } if self.scripted => {
+                    if self.doc.entities().any(|entity| entity.common().layer == name) {
+                        return Err(format!("layer {name:?} has entities"));
+                    }
+                    self.doc.layers.remove(&name).map(|layer| layer.handle())
+                        .ok_or_else(|| format!("layer {name:?} does not exist"))
+                }
                 TableOperation::BlockCreate { name, entities, erase_originals, .. } if self.scripted => {
                     if self.doc.block_records.get(&name).is_some() {
                         return Err(format!("block {name:?} already exists"));
@@ -5384,6 +5415,59 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         assert!(first.iter().all(|h| !after.contains(h)), "old handles should be retired");
         assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(2));
         assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(3));
+    }
+
+    #[test]
+    fn contour_colors_create_missing_layers() {
+        let mut host = TestHost::new();
+        host.scripted = true;
+        assert!(set_contour_layer_colors(&mut host, 1, 5));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(1));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(5));
+    }
+
+    #[test]
+    fn contour_colors_preserve_existing_layer_properties() {
+        let mut host = TestHost::new();
+        for name in ["LS-CONTOUR-MAJ", "LS-CONTOUR-MIN"] {
+            let mut layer = codec::tables::Layer::new(name);
+            layer.color = Color::from_index(7);
+            layer.line_type = "DASHED".into();
+            layer.flags.locked = true;
+            layer.set_handle(host.doc.allocate_handle());
+            host.doc.layers.add(layer).unwrap();
+        }
+        assert!(set_contour_layer_colors(&mut host, 2, 3));
+        for (name, color) in [("LS-CONTOUR-MAJ", 2), ("LS-CONTOUR-MIN", 3)] {
+            let layer = host.doc.layers.get(name).unwrap();
+            assert_eq!(layer.color, Color::from_index(color));
+            assert_eq!(layer.line_type, "DASHED");
+            assert!(layer.flags.locked);
+        }
+    }
+
+    #[test]
+    fn contour_colors_restore_first_layer_when_second_fails() {
+        let mut host = TestHost::new();
+        host.scripted = true;
+        let mut major = codec::tables::Layer::new("LS-CONTOUR-MAJ");
+        major.color = Color::from_index(7);
+        major.set_handle(host.doc.allocate_handle());
+        host.doc.layers.add(major).unwrap();
+        host.blocked_add_layer = Some("LS-CONTOUR-MIN".into());
+        assert!(!set_contour_layer_colors(&mut host, 1, 5));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(7));
+        assert!(!host.doc.layers.contains("LS-CONTOUR-MIN"));
+
+        host.doc.layers.remove("LS-CONTOUR-MAJ").unwrap();
+        host.blocked_add_layer = None;
+        host.blocked_modify_layer = Some("LS-CONTOUR-MIN".into());
+        let mut minor = codec::tables::Layer::new("LS-CONTOUR-MIN");
+        minor.set_handle(host.doc.allocate_handle());
+        host.doc.layers.add(minor).unwrap();
+        assert!(!set_contour_layer_colors(&mut host, 1, 5));
+        assert!(!host.doc.layers.contains("LS-CONTOUR-MAJ"));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(7));
     }
 
     #[test]
