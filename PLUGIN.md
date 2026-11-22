@@ -50,6 +50,13 @@ named TIN surface `EG` at elevation intervals of 0.5 drawing units.
 Every fifth interval is a major contour. The interval must be positive
 and finite, and `major-every` must be a positive integer.
 
+Run `LS_CONTOURS` without arguments to open the Contour Wizard. Select a TIN
+surface, minor interval, major contour frequency, and separate ACI colors for
+major and minor contours. The wizard applies those colors to
+`LS-CONTOUR-MAJ` and `LS-CONTOUR-MIN`, creating either layer if needed while
+preserving the other properties of existing layers. The command line form
+above remains available.
+
 The output consists of 3D polylines with nominal contour elevations
 as their Z coordinates. Major contours use `LS-CONTOUR-MAJ`;
 minor contours use `LS-CONTOUR-MIN`. Each contour carries the

@@ -157,6 +157,10 @@ fn dispatch_verb(host: &mut dyn HostApi, verb: &str, cmd: &str) -> bool {
             draw_contours(host, cmd);
             true
         }
+        crate::contour_dialog::INTERNAL_COMMAND => {
+            apply_contour_dialog(host, cmd);
+            true
+        }
         "LS_DATUM" => {
             datum_volume(host, cmd);
             true
@@ -1753,10 +1757,21 @@ fn surface_from_mesh(mesh: &Mesh) -> Surface {
 
 
 /// `LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]`.
-/// Draw continuous, tagged 3-D contour polylines from the named TIN.
+/// With no arguments, starts the native configuration wizard.
 fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
     let args: Vec<&str> = cmd.split_whitespace().skip(1).collect();
-    if args.is_empty() || args.len() > 3 {
+    if args.is_empty() {
+        let surfaces = known_surface_names(host);
+        if surfaces.is_empty() {
+            host.push_info("LS_CONTOURS: no existing TIN surfaces are available.");
+            return;
+        }
+        host.start_interactive(Box::new(crate::contour_dialog::ContourDialogCommand::new(
+            surfaces,
+        )));
+        return;
+    }
+    if args.len() > 3 {
         host.push_info("Usage: LS_CONTOURS <surface> [minor-interval=0.5] [major-every=5]");
         return;
     }
@@ -1768,7 +1783,49 @@ fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
         Ok(v) if v > 0 => v,
         _ => { host.push_error("LS_CONTOURS: major-every must be a positive integer"); return; }
     };
-    let name = args[0];
+    generate_contours(host, args[0], interval, major_every, None);
+}
+
+fn apply_contour_dialog(host: &mut dyn HostApi, cmd: &str) {
+    let Some(id) = crate::contour_dialog::parse_internal_id(cmd) else {
+        host.push_error("LS_CONTOURS: invalid internal wizard command.");
+        return;
+    };
+    let Some(config) = crate::contour_dialog::take_config(id) else {
+        host.push_error("LS_CONTOURS: missing, invalid, or already consumed wizard handoff.");
+        return;
+    };
+    // Surface names may contain spaces, so the opaque handoff carries the typed name.
+    if let Err(error) = resolve_named_surface(host, &config.surface) {
+        host.push_error(&format!(
+            "LS_CONTOURS: selected surface is no longer available: {error}"
+        ));
+        return;
+    }
+    generate_contours(
+        host,
+        &config.surface,
+        config.minor_interval,
+        config.major_every,
+        Some((
+            config.major_color,
+            config.minor_color,
+        )),
+    );
+}
+
+/// Typed entry point shared by the legacy command and the wizard handoff.
+fn generate_contours(
+    host: &mut dyn HostApi,
+    name: &str,
+    interval: f64,
+    major_every: i64,
+    colors: Option<(i16, i16)>,
+) {
+    if !interval.is_finite() || interval <= 0.0 || major_every <= 0 {
+        host.push_error("LS_CONTOURS: invalid contour configuration");
+        return;
+    }
     let surface = match resolve_named_surface(host, name) {
         Ok(s) => s,
         Err(e) => { host.push_error(&format!("LS_CONTOURS: {e}")); return; }
@@ -1838,6 +1895,21 @@ fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
         ));
         return;
     }
+    if let Some((major_aci, minor_aci)) = colors {
+        if !set_contour_layer_colors(host, major_aci, minor_aci) {
+            let removed = new_handles
+                .iter()
+                .filter(|&&h| host.remove_entity(h))
+                .count();
+            host.bump_geometry();
+            host.set_dirty();
+            host.push_error(&format!(
+                "LS_CONTOURS: could not apply selected colors to contour layers; rolled back {removed}/{} new entities; existing contours untouched.",
+                new_handles.len()
+            ));
+            return;
+        }
+    }
     let removed_old = old.iter().filter(|&&h| host.remove_entity(h)).count();
     host.bump_geometry();
     host.set_dirty();
@@ -1852,6 +1924,53 @@ fn draw_contours(host: &mut dyn HostApi, cmd: &str) {
         "LS_CONTOURS: drew {} polylines for {name}; replaced {removed_old} previous contours.",
         new_handles.len()
     ));
+}
+
+/// Apply only the layer color. Existing linetype, lineweight, visibility,
+/// locking, plottability, transparency, and description remain untouched.
+fn set_contour_layer_colors(host: &mut dyn HostApi, major_aci: i16, minor_aci: i16) -> bool {
+    let layers = [
+        ("LS-CONTOUR-MAJ", major_aci),
+        ("LS-CONTOUR-MIN", minor_aci),
+    ];
+    let mut applied: Vec<(&str, Option<Color>)> = Vec::new();
+    for (name, aci) in layers {
+        let previous = host.document().layers.get(name).map(|layer| layer.color);
+        let config = LayerConfig {
+            name: name.to_owned(),
+            color: Some(Color::from_index(aci)),
+            ..LayerConfig::default()
+        };
+        let succeeded = if previous.is_some() {
+            host.modify_layer(config)
+        } else {
+            host.add_layer(config).is_some()
+        };
+        if !succeeded {
+            host.push_error(&format!("LS_CONTOURS: could not set the color of layer {name}."));
+            for (applied_name, old_color) in applied.into_iter().rev() {
+                let restored = match old_color {
+                    Some(color) => host.modify_layer(LayerConfig {
+                        name: applied_name.to_owned(),
+                        color: Some(color),
+                        ..LayerConfig::default()
+                    }),
+                    None => host.table_operation(TableOperation::LayerDelete {
+                        name: applied_name.to_owned(),
+                        erase_objects: false,
+                    }).is_ok(),
+                };
+                if !restored {
+                    host.push_error(&format!(
+                        "LS_CONTOURS: could not restore layer {applied_name}; use Undo to review partial color changes."
+                    ));
+                }
+            }
+            return false;
+        }
+        applied.push((name, previous));
+    }
+    true
 }
 
 /// `LS_DATUM <surface> <elevation>` — cut/fill of one surface against a
@@ -3604,6 +3723,8 @@ mod tests {
         /// Accept only this many items on the next bulk call (simulated partial IPC write).
         bulk_partial_once: Option<usize>,
         blocked_remove: Option<codec::Handle>,
+        blocked_add_layer: Option<String>,
+        blocked_modify_layer: Option<String>,
         /// Answer `add_layer` and `table_operation(BlockCreate)` as the real
         /// host (API v7) does; off, they are refused like the trait defaults.
         scripted: bool,
@@ -3625,6 +3746,8 @@ mod tests {
                 bulk_limit: None,
                 bulk_partial_once: None,
                 blocked_remove: None,
+                blocked_add_layer: None,
+                blocked_modify_layer: None,
                 scripted: false,
                 blocks_created: Vec::new(),
                 selected: Vec::new(),
@@ -3684,7 +3807,8 @@ mod tests {
         }
         fn bump_geometry(&mut self) {}
         fn add_layer(&mut self, config: LayerConfig) -> Option<codec::Handle> {
-            if !self.scripted || self.doc.layers.contains(&config.name) {
+            if !self.scripted || self.doc.layers.contains(&config.name)
+                || self.blocked_add_layer.as_deref() == Some(config.name.as_str()) {
                 return None;
             }
             let mut layer = codec::tables::Layer::new(&config.name);
@@ -3699,8 +3823,30 @@ mod tests {
             self.doc.layers.add(layer).ok()?;
             Some(handle)
         }
+        fn modify_layer(&mut self, config: LayerConfig) -> bool {
+            if self.blocked_modify_layer.as_deref() == Some(config.name.as_str()) {
+                return false;
+            }
+            let Some(layer) = self.doc.layers.get_mut(&config.name) else {
+                return false;
+            };
+            if let Some(color) = config.color {
+                layer.color = color;
+            }
+            if let Some(line_type) = config.linetype {
+                layer.line_type = line_type;
+            }
+            true
+        }
         fn table_operation(&mut self, operation: TableOperation) -> Result<codec::Handle, String> {
             match operation {
+                TableOperation::LayerDelete { name, erase_objects: false } if self.scripted => {
+                    if self.doc.entities().any(|entity| entity.common().layer == name) {
+                        return Err(format!("layer {name:?} has entities"));
+                    }
+                    self.doc.layers.remove(&name).map(|layer| layer.handle())
+                        .ok_or_else(|| format!("layer {name:?} does not exist"))
+                }
                 TableOperation::BlockCreate { name, entities, erase_originals, .. } if self.scripted => {
                     if self.doc.block_records.get(&name).is_some() {
                         return Err(format!("block {name:?} already exists"));
@@ -5248,6 +5394,15 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
     fn contours_dispatch_rerun_replaces_not_duplicates() {
         let mut host = TestHost::new();
         host.doc = doc_with_tagged_mesh("EG");
+        for (name, color) in [
+            ("LS-CONTOUR-MAJ", Color::from_index(2)),
+            ("LS-CONTOUR-MIN", Color::from_index(3)),
+        ] {
+            let mut layer = codec::tables::Layer::new(name);
+            layer.color = color;
+            layer.set_handle(host.doc.allocate_handle());
+            host.doc.layers.add(layer).unwrap();
+        }
         assert!(handle(&mut host, "LS_CONTOURS EG 0.5 5"));
         let first = contour_handles_for_surface(host.document(), "EG");
         assert!(!first.is_empty(), "command should generate contours");
@@ -5258,6 +5413,209 @@ SS,OP33,FP27,AR0.00000,ZE93.43130,SD45.3524,--CHK 27
         let after = contour_handles_for_surface(host.document(), "EG");
         assert_eq!(after.len(), count, "rerun must replace, not duplicate");
         assert!(first.iter().all(|h| !after.contains(h)), "old handles should be retired");
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(2));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(3));
+    }
+
+    #[test]
+    fn contour_colors_create_missing_layers() {
+        let mut host = TestHost::new();
+        host.scripted = true;
+        assert!(set_contour_layer_colors(&mut host, 1, 5));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(1));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(5));
+    }
+
+    #[test]
+    fn contour_colors_preserve_existing_layer_properties() {
+        let mut host = TestHost::new();
+        for name in ["LS-CONTOUR-MAJ", "LS-CONTOUR-MIN"] {
+            let mut layer = codec::tables::Layer::new(name);
+            layer.color = Color::from_index(7);
+            layer.line_type = "DASHED".into();
+            layer.flags.locked = true;
+            layer.set_handle(host.doc.allocate_handle());
+            host.doc.layers.add(layer).unwrap();
+        }
+        assert!(set_contour_layer_colors(&mut host, 2, 3));
+        for (name, color) in [("LS-CONTOUR-MAJ", 2), ("LS-CONTOUR-MIN", 3)] {
+            let layer = host.doc.layers.get(name).unwrap();
+            assert_eq!(layer.color, Color::from_index(color));
+            assert_eq!(layer.line_type, "DASHED");
+            assert!(layer.flags.locked);
+        }
+    }
+
+    #[test]
+    fn contour_colors_restore_first_layer_when_second_fails() {
+        let mut host = TestHost::new();
+        host.scripted = true;
+        let mut major = codec::tables::Layer::new("LS-CONTOUR-MAJ");
+        major.color = Color::from_index(7);
+        major.set_handle(host.doc.allocate_handle());
+        host.doc.layers.add(major).unwrap();
+        host.blocked_add_layer = Some("LS-CONTOUR-MIN".into());
+        assert!(!set_contour_layer_colors(&mut host, 1, 5));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(7));
+        assert!(!host.doc.layers.contains("LS-CONTOUR-MIN"));
+
+        host.doc.layers.remove("LS-CONTOUR-MAJ").unwrap();
+        host.blocked_add_layer = None;
+        host.blocked_modify_layer = Some("LS-CONTOUR-MIN".into());
+        let mut minor = codec::tables::Layer::new("LS-CONTOUR-MIN");
+        minor.set_handle(host.doc.allocate_handle());
+        host.doc.layers.add(minor).unwrap();
+        assert!(!set_contour_layer_colors(&mut host, 1, 5));
+        assert!(!host.doc.layers.contains("LS-CONTOUR-MAJ"));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(7));
+    }
+
+    #[test]
+    fn contour_wizard_colors_layers_independently_and_roundtrip_in_dwg() {
+        use ocs_plugin_api::dialog::{DialogResponse, DialogValue};
+        use ocs_plugin_api::host::CommandStep;
+
+        let mut host = TestHost::new();
+        host.scripted = true;
+        host.doc = doc_with_tagged_mesh("EG");
+        for name in ["LS-CONTOUR-MAJ", "LS-CONTOUR-MIN"] {
+            let mut layer = codec::tables::Layer::new(name);
+            layer.color = Color::from_index(7);
+            layer.line_type = "DASHED".into();
+            layer.set_handle(host.doc.allocate_handle());
+            host.doc.layers.add(layer).unwrap();
+        }
+
+        assert!(handle(&mut host, "LS_CONTOURS"));
+        let mut interactive = host.interactive.take().expect("wizard registered");
+        let dialog = interactive.modal_dialog().expect("wizard dialog");
+        let surface_index = dialog
+            .rows
+            .iter()
+            .flat_map(|row| &row.controls)
+            .find_map(|control| match control {
+                ocs_plugin_api::dialog::DialogControl::Choice { id, options, .. }
+                    if id == "surface" => options.iter().position(|name| name == "EG"),
+                _ => None,
+            })
+            .expect("surface selector contains EG");
+        let options = crate::contour_dialog::ACI_PALETTE;
+        let labels: Vec<String> = options
+            .iter()
+            .map(|(aci, name)| {
+                let (r, g, b) = Color::from_index(*aci).rgb().unwrap();
+                format!("ACI {aci} — {name} #{r:02X}{g:02X}{b:02X}")
+            })
+            .collect();
+        let response = DialogResponse::Submitted(std::collections::HashMap::from([
+            (
+                "surface".into(),
+                DialogValue::Choice {
+                    index: surface_index,
+                    text: "EG".into(),
+                },
+            ),
+            ("minor_interval".into(), DialogValue::Text("0.5".into())),
+            ("major_every".into(), DialogValue::Text("5".into())),
+            (
+                "major_color".into(),
+                DialogValue::Choice {
+                    index: 0,
+                    text: labels[0].clone(),
+                },
+            ),
+            (
+                "minor_color".into(),
+                DialogValue::Choice {
+                    index: 4,
+                    text: labels[4].clone(),
+                },
+            ),
+        ]));
+        let step = interactive.on_dialog_response(response.clone());
+        let CommandStep::Dispatch(internal) = step else {
+            panic!("valid wizard response should dispatch: {step:?}; {:?}", interactive.modal_dialog());
+        };
+        assert!(interactive.modal_dialog().is_none(), "modal must not reopen");
+        drop(interactive);
+        assert!(handle(&mut host, &internal));
+
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(1));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(5));
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MAJ").unwrap().line_type, "DASHED");
+        assert_eq!(host.doc.layers.get("LS-CONTOUR-MIN").unwrap().line_type, "DASHED");
+        let contours: Vec<_> = host
+            .doc
+            .entities()
+            .filter(|entity| surface_tag(entity) == Some(("EG", "CONTOUR")))
+            .collect();
+        assert!(!contours.is_empty());
+        assert!(contours.iter().all(|entity| entity.common().color == Color::ByLayer));
+
+        let first_count = contours.len();
+        assert!(handle(&mut host, "LS_CONTOURS"));
+        let mut interactive = host.interactive.take().expect("wizard registered for rerun");
+        let CommandStep::Dispatch(internal) = interactive.on_dialog_response(response) else {
+            panic!("valid rerun response should dispatch");
+        };
+        assert!(interactive.modal_dialog().is_none());
+        drop(interactive);
+        assert!(handle(&mut host, &internal));
+        let after_rerun = contour_handles_for_surface(host.document(), "EG");
+        assert_eq!(after_rerun.len(), first_count, "wizard regeneration must not duplicate curves");
+
+        register_ls_app_ids(&mut host.doc);
+        let bytes = DwgWriter::write_to_vec(&host.doc).expect("save wizard colors");
+        let reopened = DwgReader::from_stream(Cursor::new(bytes))
+            .read()
+            .expect("reopen wizard colors");
+        assert_eq!(reopened.layers.get("LS-CONTOUR-MAJ").unwrap().color, Color::from_index(1));
+        assert_eq!(reopened.layers.get("LS-CONTOUR-MIN").unwrap().color, Color::from_index(5));
+        let dxf_bytes = codec::DxfWriter::new(&host.doc)
+            .write_to_vec()
+            .expect("save wizard colors to DXF");
+        let reopened_dxf = codec::DxfReader::from_reader(Cursor::new(dxf_bytes))
+            .expect("open wizard DXF")
+            .read()
+            .expect("reopen wizard colors from DXF");
+        assert_eq!(
+            reopened_dxf.layers.get("LS-CONTOUR-MAJ").unwrap().color,
+            Color::from_index(1)
+        );
+        assert_eq!(
+            reopened_dxf.layers.get("LS-CONTOUR-MIN").unwrap().color,
+            Color::from_index(5)
+        );
+    }
+
+    #[test]
+    fn cancelling_contour_wizard_does_not_change_layers_or_entities() {
+        use ocs_plugin_api::dialog::DialogResponse;
+        use ocs_plugin_api::host::CommandStep;
+
+        let mut host = TestHost::new();
+        host.doc = doc_with_tagged_mesh("EG");
+        let layers_before: Vec<_> = host
+            .doc
+            .layers
+            .iter()
+            .map(|layer| (layer.name.clone(), layer.color))
+            .collect();
+        let entities_before = host.doc.entities().count();
+        assert!(handle(&mut host, "LS_CONTOURS"));
+        let mut interactive = host.interactive.take().expect("wizard registered");
+        assert!(matches!(
+            interactive.on_dialog_response(DialogResponse::Cancelled),
+            CommandStep::Cancel
+        ));
+        assert_eq!(host.doc.entities().count(), entities_before);
+        let layers_after: Vec<_> = host
+            .doc
+            .layers
+            .iter()
+            .map(|layer| (layer.name.clone(), layer.color))
+            .collect();
+        assert_eq!(layers_after, layers_before);
     }
 
     #[test]
